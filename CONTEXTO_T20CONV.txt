@@ -1,0 +1,3138 @@
+================================================================================
+ CONTEXTO DO PROJETO t20conv — exportado do chat (projeto Claude "T20_FVTT14")
+ Data: 2026-10-13
+ Para usar no Claude Code: coloque este arquivo na raiz do projeto e peça
+ "leia CONTEXTO_T20CONV.txt e continue o projeto". O código-fonte completo
+ está no fim deste arquivo (seção 9) — dá para recriar todos os arquivos dele.
+================================================================================
+
+1. OBJETIVO
+--------------------------------------------------------------------------------
+Automatizar a criação de ameaças (NPCs) de Tormenta20 no Foundry VTT:
+PDF do livro (ex.: Ameaças de Arton) -> texto da ficha -> JSON de ator do
+sistema "tormenta20" do Foundry, com o máximo de automação: rolagens de
+ataque/dano/cura, bônus condicionais (ex.: Avesso à Honra do Oni), efeitos
+ativos, magias com valores finais etc.
+
+Ambiente do usuário:
+- Foundry VTT v12 (core 12.331), sistema tormenta20 v1.4.213.
+- Módulo próprio do usuário: https://github.com/magoris19/ameacas-de-arton-cdm
+  (compêndio "ameacas-de-arton-cdm", packs: ameacas [Actor], items [Item],
+  journals). Feito à mão; serve de base de convenções, mas a ideia é
+  MELHORAR os processos, não copiar erros.
+- Módulo de ícones requerido: cdm-icons (tokens em modules/cdm-icons/tokens-t20/).
+- PC: Ryzen 5 3500, RTX 5060 8GB (relevante só se for usar OCR/VLM local).
+
+2. DECISÕES DE ARQUITETURA
+--------------------------------------------------------------------------------
+- Programa em Python local em vez de "chat especializado": custo zero de
+  tokens por ficha, resultado determinístico e repetível.
+- PDFs oficiais de T20 têm texto digital -> NÃO precisa de OCR; usar PyMuPDF
+  (lê fontes: negrito/itálico ajudam a achar rótulos). OCR (PaddleOCR) só se
+  algum PDF for escaneado.
+- Parte fixa da ficha (cabeçalho, defesas, ataques, atributos, perícias):
+  regex. Habilidades em texto livre: motor de regras (regex de padrões T20).
+- LLM (API Claude, modelo barato) fica para DEPOIS, só para as habilidades
+  que as regras não cobrirem — medir primeiro quantas sobram com o PDF real.
+- Biblioteca: o compêndio do usuário (1.761 poderes, 312 magias, 883 armas)
+  vira um índice reutilizável: ícones, escola/círculo de magias, e reuso de
+  poderes já configurados quando o texto é idêntico.
+
+3. FLUXO
+--------------------------------------------------------------------------------
+  PDF --tools/extrair_pdf.py--> fichas/*.txt --converter.py--> saida/*.json --macro--> Foundry
+                                                    ^
+                           biblioteca.json (gerada do compêndio do usuário)
+
+  1) Biblioteca (uma vez): macro macros/exportar_compendio.js no Foundry
+     exporta "ameacas-de-arton-cdm.ameacas" e "tormenta20.magias" em JSON;
+     depois: python -m t20conv.biblioteca <arquivos ou pastas> -o biblioteca.json
+     (também aceita pastas geradas por "foundryvtt-cli unpack"; no chat eu
+     desempacotei os LevelDB do repositório com @foundryvtt/foundryvtt-cli@1.0.3
+     via node: extractPack(src, dest)).
+  2) python tools/extrair_pdf.py livro.pdf --paginas 140-150 -o fichas/x.txt
+     (--diagnostico mostra fonte/flags de cada trecho para calibrar)
+  3) python converter.py fichas/ -o saida/ --biblioteca biblioteca.json
+  4) No Foundry: macro macros/importar_atores.js -> escolher saida/_todos.json
+     (ou botão direito num ator -> Import Data -> saida/<nome>.json)
+  5) Ler saida/_relatorio.txt ([auto], [texto], [biblioteca], [magia], ⚠).
+
+4. FORMATO DE TEXTO DA FICHA (entrada do conversor)
+--------------------------------------------------------------------------------
+  ONI
+  ND 5
+  Espírito Médio [solo]          <- [solo]/[especial]/[lacaio]; padrão solo
+  **Iniciativa** +5, **Percepção** +3, faro, visão na penumbra
+  **Defesa** 24, **Fort** +17, **Ref** +11, **Von** +5, imunidade a doenças, fogo e veneno, redução de dano 5
+  **Pontos de Vida** 200
+  **Deslocamento** 9m (6q)
+  **Pontos de Mana** 112          (opcional)
+  **Corpo a Corpo** Machado de guerra +17 (1d12+16, x3) e chifres +17 (1d6+10 mais doença).
+  **À Distância** ...
+  **Nome da Habilidade (Execução, N PM)** texto...
+  **Magias** Como um mago de 14º nível (CD 38, limite de PM 23).
+  • *Bola de Fogo (Padrão, 11 PM)* texto...
+  **For** 5, **Des** 1, **Con** 3, **Int** 0, **Sab** –1, **Car** –2
+  **Perícias** Atletismo +9, Intimidação +7.
+  **Equipamento** Machado de guerra. **Tesouro** Padrão.
+Regras: rótulos em **negrito**; linhas quebradas e hifenização são juntadas;
+rótulos internos quebrados (Fort/Ref/Von/Des.../Percepção, Tesouro após
+Equipamento) são colados à linha anterior; várias fichas por arquivo
+separadas por linha "==="; parser é tolerante a MAIÚSCULAS (versalete do PDF).
+
+5. CONVENÇÕES DO SISTEMA tormenta20 (levantadas de 408 NPCs do compêndio)
+--------------------------------------------------------------------------------
+Ator:
+- type "npc". system.atributos.<for|des|con|int|sab|car>.base = valor.
+- attributes.pv/pm {value,max}; attributes.movement {walk,fly,swim,climb,burrow} em m;
+  attributes.defesa.base = Defesa do livro; attributes.nd = "5" (string);
+  attributes.sentidos.value: escuro, faro, penumbra, cegas (+custom).
+  attributes.cd: compêndio deixa 10 quase sempre (CD de magia vai no texto).
+- detalhes: tipo (ani/con/esp/hum/mon/mor), raca, role (solo/special/lackey),
+  resistencias (texto da linha), ataquescac/ataquesad (texto), equipamento, tesouro.
+- tracos.tamanho: min/peq/med/gra/eno/col. Token: gra 2, eno 3, col 4 quadrados.
+- tracos.resistencias.<tipo>: {base (RD), imunidade, vulnerabilidade}; tipos:
+  acido corte eletricidade essencia fogo frio impacto luz psiquico perfuracao
+  trevas perda, e "dano" (RD geral).
+- tracos.ic.value (imunidade a condições): medo, atordoado, metabolismo, cansaco,
+  metamorfose, veneno, caido, sentidos, movimento, ofuscado, alquebrado,
+  esmorecido, frustrado, confuso, lento, fascinado, enfeiticado, mental,
+  surpreendido, paralisado. Resto (ex.: "doenças") em ic.custom.
+- Perícias (convenção do Oni, dominante): treinadas -> value = total do livro,
+  treinado true, outros 0. Fort/Ref/Von -> value 0, outros = total.
+  Chaves: acro ades atle atua cava conh cura dipl enga fort furt guer inic inti
+  intu inve joga ladi luta mist nobr ofi0 perc pilo pont refl reli sobr vont.
+Itens:
+- arma: rolls Ataque [["1d20","",""],["luta"|"pont","",""],["17","",""]],
+  Dano [["1d6+10","perfuracao",""]]; criticoM (margem), criticoX (mult.);
+  proficiencia natural/simples/marcial/exotica/fogo; proposito corpo-a-corpo/
+  disparo/arremesso; empunhadura leve/uma/duas; campo "ataques" quase sempre 1
+  (nome "Duas Garras" com ataques=1 — semântica de ataques>1 a confirmar).
+- poder: system.tipo "ability" para habilidades de ameaça; ativacao.execucao
+  free/action/move/full/reaction; ativacao.custo = PM.
+- magia: tipo arc/div/uni, escola (abj adv con enc evo ilu nec tra), circulo
+  "1".."5", alcance short/medium/long/touch/self, duracao.units
+  inst/scene/sust/round/turn/day; descrição no padrão do compêndio:
+  <section class="secret">linha da ficha</section> + descrição base.
+- Rolagens: tipos ataque/dano/formula. Tipos de dano especiais: curapv,
+  curatpv, perda. Manobra = formula "d20+N" com nome da manobra.
+Efeitos (flags.tormenta20: onuse, attack, skill, spell, self, items, custo,
+aumenta, durationScene):
+- Bônus condicional em ataque (Avesso à Honra): no poder, onuse+attack,
+  transfer true, disabled true, changes key "dano"/"ataque" modo 2;
+  margem de ameaça: "criticoM" modo 2 valor "-N".
+- Bônus condicional em teste: onuse+skill, items "Vontade;Reflexos" (nomes
+  de perícia separados por ;), change "roll" modo 2 (aceita "@car", "kh").
+- Resistência a magia +N: idem com items "Vontade;Reflexos;Fortitude".
+- Magia Acelerada: onuse+spell, change "execucao" modo 5 "livre", flag custo.
+- Aprimoramentos de magia: onuse+self(+aumenta), keys dano / dano:fogo (modo 0)
+  / alcance / alvo / duracao / area / execucao / condicao / resistencia.
+- Buff de magia/poder ativo: durationScene true, transfer false, disabled false.
+- Passivos sempre ligados: transfer true, disabled false.
+- Chaves de ator usadas: system.attributes.defesa.bonus, system.atributos.X.value,
+  system.pericias.X.bonus, system.modificadores.ataque.{geral,cac,ad},
+  system.modificadores.dano.{geral,cac,ad,mag}, system.tracos.resistencias.X.bonus,
+  system.attributes.movement.X (modo 5 para voo concedido).
+
+6. MELHORIAS DO CONVERSOR SOBRE O FEITO À MÃO
+--------------------------------------------------------------------------------
+- Dano extra condicional leva o tipo no dado: "1d10[trevas]" (no compêndio
+  ficava só "1d10" e o tipo se perdia). (A CONFIRMAR no Foundry.)
+- Tipos de dano canônicos por regra: mordida perfuração, garra corte, chifres
+  perfuração, pancada impacto, cauda impacto, ferrão perfuração, tentáculo impacto…
+- Magias usam dano/cura/CD FINAIS da ficha (Bola de Fogo 15d6+23, Coluna de
+  Chamas 8d6 fogo + 8d6 luz, Curar Ferimentos 11d8+11 e 6d8+6); aprimoramentos
+  da biblioteca são descartados para não somar em dobro.
+- "(já contabilizado)": trecho ignorado (evita somar Int 2x no Arcano de Batalha).
+- Bônus permanentes ("recebe +2 em Furtividade") NÃO viram efeito: os números
+  do livro já os incluem.
+- "mais doença" num ataque: texto da habilidade Doença copiado na arma + chatFlavor.
+- Ataque concedido por magia (mordida da Transformação em Dragão) vira arma extra.
+- Poder com texto idêntico a um configurado no compêndio é reaproveitado
+  (só quando as regras não automatizam nada e o caso não está "decidido").
+
+7. ACHADOS NO COMPÊNDIO DO USUÁRIO (revisar)
+--------------------------------------------------------------------------------
+- Oni: dois itens "chifres" (um com 1d6+17 em vez de 1d6+10); machado de
+  guerra com crítico x2 (livro: x3); imunidade a doenças não marcada.
+- Mordida com dano "corte" em 92 atores; pancada com "corte" em 9.
+- Raio Arcano (4d12+8 já inclui Int) + efeito ativo Arcano de Batalha
+  (+@atributoChave em dano.mag): conferir se soma duas vezes.
+- Exports do mundo trazem efeitos duplicados no nível do ator (transfer false).
+
+8. ESTADO ATUAL E PRÓXIMOS PASSOS
+--------------------------------------------------------------------------------
+Feito e testado (no ambiente do chat):
+- Conversor completo; 3 fichas (Oni ND5, Dragão Celestial Jovem ND10,
+  Dracomante Superior ND14) convertidas; números conferem com o livro
+  (atributos, PV, PM, Defesa, Fort/Ref/Von, Iniciativa, Percepção, deslocamentos).
+- IDs e fórmulas validados; macros com sintaxe checada (node --check).
+- Avaliação das regras sobre 1.761 poderes do compêndio: 478 compatíveis com o
+  feito à mão, 162 automatizados só pelas regras, 305 só à mão (muitos são
+  parceiros/montarias/raças/classes), 765 sem automação em nenhum.
+NÃO testado ainda:
+- Importação real no Foundry. CONFERIR com o oni.json:
+  (a) Avesso à Honra aparece como opção no ataque e "1d10[trevas]" rola/aplica
+      como trevas; se não funcionar, voltar para "1d10" (convenção antiga);
+  (b) Atletismo do Oni mostra +9 (convenção de perícias);
+  (c) campo "ataques" das armas (rola N ataques se >1?);
+  (d) attributes.cd (deixado 10).
+- Extrator de PDF: só testado com PDF sintético. Próximo passo: rodar
+  "python tools/extrair_pdf.py livro.pdf --paginas <pág. com ficha> --diagnostico"
+  no PDF real e calibrar (versalete, ícones de papel solo/especial/lacaio,
+  duas colunas, selo "ND x" separado do nome, nome em duas linhas).
+- Mapear os ícones de papel (o do Oni/Dragão = solo; o do Dracomante = especial).
+- Depois de rodar um capítulo inteiro: medir quantas habilidades ficam [texto]
+  e decidir se vale a etapa opcional com LLM (saída JSON de efeitos, só para
+  essas habilidades, modelo barato).
+Ideias pendentes: Presença Aterradora (teste de Intimidação) sem automação;
+camuflagem e "resistência a magia" dentro de buffs não têm campo; sight do
+token (visão no escuro) não configurado; condições infligidas ("fica em
+chamas", "sangrando") ainda só em texto.
+
+Ferramentas de apoio no projeto:
+- tools/analisar_compendio.py <pasta de atores>: levanta convenções (chaves de
+  efeito, flags, perícias, códigos).
+- tools/avaliar_regras.py biblioteca.json [n]: compara regras x feito à mão.
+- tools/gerar_template.py <ator exportado>: regenera t20conv/template_npc.json
+  e t20conv/esqueletos.json (precisa de exemplos/fvtt-Actor-oni-*.json e
+  fvtt-Actor-dracomante-*.json — os exports do usuário; os .json gerados já
+  estão no código abaixo, então não é preciso rodar).
+Dependências: Python 3.10+, pymupdf (só para PDF).
+
+9. CÓDIGO-FONTE COMPLETO
+--------------------------------------------------------------------------------
+Cada arquivo começa com uma linha "##### ARQUIVO: <caminho> #####".
+Estrutura:
+  converter.py                 CLI principal
+  t20conv/__init__.py          (vazio)
+  t20conv/parser.py            texto -> ficha estruturada
+  t20conv/regras.py            motor de regras (rolagens/efeitos)
+  t20conv/construtor.py        ficha -> JSON do ator
+  t20conv/biblioteca.py        índice do compêndio + reuso
+  t20conv/template_npc.json    esqueleto de ator NPC vazio
+  t20conv/esqueletos.json      esqueletos de poder/arma/magia/efeito
+  tools/*.py                   extrator de PDF e ferramentas de análise
+  macros/*.js                  macros do Foundry (importar/exportar)
+  exemplos/fichas/*.txt        as 3 fichas de teste
+  README.md
+
+
+##### ARQUIVO: converter.py #####
+"""Converte fichas de ameaças de Tormenta20 (texto) em atores JSON para o Foundry VTT.
+
+Uso:
+  python converter.py fichas/ -o saida/ [--biblioteca biblioteca.json] [--img caminho]
+
+Entrada: arquivos .txt (uma ou várias fichas por arquivo; separe fichas com uma linha "===").
+Saída:
+  saida/<nome>.json        um ator por arquivo (Foundry: botão direito no ator > Import Data)
+  saida/_todos.json        todos os atores numa lista (macro importar_atores.js, em lote)
+  saida/_relatorio.txt     o que foi automatizado e o que precisa de revisão
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+from t20conv.biblioteca import Biblioteca
+from t20conv.construtor import Construtor
+from t20conv.parser import norm, parse
+
+
+def fichas_em(caminhos: list[Path]):
+    for c in caminhos:
+        arqs = sorted(c.glob("*.txt")) if c.is_dir() else [c]
+        for a in arqs:
+            for bloco in re.split(r"^\s*===+\s*$", a.read_text(encoding="utf-8"), flags=re.M):
+                if bloco.strip():
+                    yield a.name, bloco
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("entradas", nargs="+", type=Path)
+    ap.add_argument("-o", "--saida", type=Path, default=Path("saida"))
+    ap.add_argument("--biblioteca", default="biblioteca.json",
+                    help="índice gerado por 'python -m t20conv.biblioteca' (opcional)")
+    ap.add_argument("--img", default="icons/svg/mystery-man.svg", help="imagem padrão de ator/token")
+    a = ap.parse_args()
+
+    bib = Biblioteca.carregar(a.biblioteca)
+    if not bib.poderes:
+        print(f"(sem biblioteca em '{a.biblioteca}': seguindo só com as regras)", file=sys.stderr)
+    cons = Construtor(bib, a.img)
+    a.saida.mkdir(parents=True, exist_ok=True)
+    todos, linhas = [], []
+    for origem, bloco in fichas_em(a.entradas):
+        ficha = parse(bloco)
+        ator, rel = cons.ator(ficha)
+        todos.append(ator)
+        nome_arq = re.sub(r"[^a-z0-9]+", "-", norm(ator["name"])).strip("-") or "ator"
+        (a.saida / f"{nome_arq}.json").write_text(json.dumps(ator, ensure_ascii=False, indent=1), encoding="utf-8")
+        linhas.append(f"■ {ator['name']} (ND {ficha['nd']})  ← {origem}")
+        linhas += [f"   {i}" for i in rel["itens"]]
+        linhas += [f"   ⚠ {w}" for w in rel["avisos"]]
+        linhas.append("")
+    (a.saida / "_todos.json").write_text(json.dumps(todos, ensure_ascii=False), encoding="utf-8")
+    rel_txt = "\n".join(linhas)
+    (a.saida / "_relatorio.txt").write_text(rel_txt, encoding="utf-8")
+    print(rel_txt)
+    print(f"{len(todos)} ator(es) em {a.saida}/")
+
+
+if __name__ == "__main__":
+    main()
+
+##### ARQUIVO: t20conv/__init__.py #####
+
+##### ARQUIVO: t20conv/parser.py #####
+"""Texto de ficha de ameaça (Tormenta20) -> dicionário estruturado ("ficha").
+
+Formato de entrada (o que o extrator de PDF gera, e o que dá para colar à mão):
+  - 1ª linha: nome; em seguida "ND x" e a linha de tipo/tamanho
+    (opcionalmente com [solo] / [especial] / [lacaio]).
+  - Rótulos em negrito ficam entre **...** (ex.: **Iniciativa** +5).
+  - Magias em lista começam com "•" e o nome pode estar em *itálico*.
+  - "---" separa blocos (opcional, é ignorado).
+  - Linhas quebradas no meio são juntadas automaticamente (inclusive hifenização).
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+
+# ---------------------------------------------------------------- utilidades
+
+def sem_acento(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", sem_acento(s).lower()).strip()
+
+
+def num(s: str) -> int:
+    return int(s.replace("–", "-").replace("−", "-").replace("+", "").strip())
+
+
+def titulo(s: str) -> str:
+    """'DRAGÃO DE FOGO' -> 'Dragão de Fogo' (preposições/artigos minúsculos, exceto no início)."""
+    if not s.isupper():
+        return s
+    pal = s.title().split(" ")
+    menores = {"de", "da", "do", "das", "dos", "e", "o", "a", "os", "as", "em", "no", "na"}
+    return " ".join(w.lower() if i and norm(w) in menores else w for i, w in enumerate(pal))
+
+
+def limpa_md(s: str) -> str:
+    return s.replace("**", "").replace("*", "").strip()
+
+
+def dividir_topo(s: str, seps=(", ", " e ")) -> list[str]:
+    """Divide por separadores apenas fora de parênteses."""
+    partes, nivel, atual, i = [], 0, "", 0
+    while i < len(s):
+        c = s[i]
+        if c == "(":
+            nivel += 1
+        elif c == ")":
+            nivel -= 1
+        if nivel == 0:
+            hit = next((sp for sp in seps if s.startswith(sp, i)), None)
+            if hit:
+                partes.append(atual)
+                atual = ""
+                i += len(hit)
+                continue
+        atual += c
+        i += 1
+    partes.append(atual)
+    return [p.strip() for p in partes if p.strip()]
+
+
+# ---------------------------------------------------------------- tabelas
+
+TAMANHOS = {"minusculo": "min", "pequeno": "peq", "medio": "med", "grande": "gra",
+            "enorme": "eno", "colossal": "col"}
+TIPOS = {"animal": "ani", "construto": "con", "espirito": "esp", "humanoide": "hum",
+         "monstro": "mon", "morto-vivo": "mor"}
+PAPEIS = {"solo": "solo", "especial": "special", "lacaio": "lackey"}
+
+SENTIDOS = {"faro": "faro", "visao na penumbra": "penumbra", "visao no escuro": "escuro",
+            "percepcao as cegas": "cegas"}
+
+TIPOS_DANO = {"acido": "acido", "corte": "corte", "eletricidade": "eletricidade",
+              "essencia": "essencia", "fogo": "fogo", "frio": "frio", "impacto": "impacto",
+              "luz": "luz", "psiquico": "psiquico", "perfuracao": "perfuracao",
+              "trevas": "trevas", "dano": "dano"}
+
+PERICIAS = {"acrobacia": "acro", "adestramento": "ades", "atletismo": "atle", "atuacao": "atua",
+            "cavalgar": "cava", "conhecimento": "conh", "cura": "cura", "diplomacia": "dipl",
+            "enganacao": "enga", "fortitude": "fort", "furtividade": "furt", "guerra": "guer",
+            "iniciativa": "inic", "intimidacao": "inti", "intuicao": "intu",
+            "investigacao": "inve", "jogatina": "joga", "ladinagem": "ladi", "luta": "luta",
+            "misticismo": "mist", "nobreza": "nobr", "oficio": "ofi0", "percepcao": "perc",
+            "pilotagem": "pilo", "pontaria": "pont", "reflexos": "refl", "religiao": "reli",
+            "sobrevivencia": "sobr", "vontade": "vont"}
+
+EXECUCOES = {"livre": "free", "padrao": "action", "movimento": "move", "completa": "full",
+             "reacao": "reaction"}
+
+NUMERAIS = {"duas": 2, "dois": 2, "tres": 3, "quatro": 4, "cinco": 5, "seis": 6}
+
+ROTULOS_FIXOS = ("iniciativa", "defesa", "pontos de vida", "pontos de mana", "deslocamento",
+                 "corpo a corpo", "a distancia", "magias", "for", "pericias", "equipamento",
+                 "tesouro")
+
+DADO = r"\d+d\d+(?:\s*[+\-–]\s*\d+)?"
+
+
+# chaves de imunidade a condição usadas no compêndio (system.tracos.ic.value)
+IC = [("medo", "medo"), ("atordoa", "atordoado"), ("metabolismo", "metabolismo"),
+      ("cansaco", "cansaco"), ("fadiga", "cansaco"), ("metamorfose", "metamorfose"),
+      ("veneno", "veneno"), ("caido", "caido"), ("sentidos", "sentidos"),
+      ("movimento", "movimento"), ("ofuscad", "ofuscado"), ("alquebrad", "alquebrado"),
+      ("esmorecid", "esmorecido"), ("frustrad", "frustrado"), ("confus", "confuso"),
+      ("lento", "lento"), ("fascinad", "fascinado"), ("enfeiti", "enfeiticado"),
+      ("mentais", "mental"), ("mental", "mental"), ("surpreendid", "surpreendido"),
+      ("paralis", "paralisado")]
+
+
+def condicao_ic(item: str) -> str | None:
+    n = norm(item)
+    return next((v for k, v in IC if k in n), None)
+
+
+def tipo_dano(palavra: str) -> str | None:
+    return TIPOS_DANO.get(norm(palavra))
+
+
+# ---------------------------------------------------------------- linhas lógicas
+
+def linhas_logicas(texto: str) -> list[str]:
+    out: list[str] = []
+    for bruta in texto.splitlines():
+        ln = bruta.strip()
+        if not ln:
+            continue
+        novo = ln.startswith(("**", "•", "---")) or not out or len(out) < 3 and "**" not in ln
+        # rótulos que só aparecem no meio de uma linha (quebra de linha do PDF): junta à anterior
+        if out and (re.match(r"^\*\*\s*(Fort|Ref|Von|Des|Con|Int|Sab|Car|Percep[çc][ãa]o)\b", ln, re.I)
+                    or re.match(r"^\*\*\s*Tesouro", ln, re.I) and re.match(r"^\*\*\s*Equipamento", out[-1], re.I)):
+            novo = False
+        if novo or out[-1] == "---":
+            out.append(ln)
+            continue
+        ant = out[-1]
+        if re.search(r"[a-zà-ú]-$", ant) and re.match(r"[a-zà-ú]", ln):
+            out[-1] = ant[:-1] + ln          # hifenização "macha-" + "do"
+        else:
+            out[-1] = ant + " " + ln
+    return [l for l in out if l != "---"]
+
+
+def cabecalho_execucao(paren: str) -> dict:
+    """'(Reação, 23 PM)' / '(Livre, +4 PM)' / '(Padrão, 10 PM, sustentada)'."""
+    r = {"execucao": "", "custo": 0, "sustentada": False, "especial": []}
+    for parte in [p.strip() for p in paren.split(",")]:
+        n = norm(parte)
+        m = re.match(r"\+?(\d+)\s*pm$", n)
+        if m:
+            r["custo"] = int(m.group(1))
+        elif n in EXECUCOES:
+            r["execucao"] = EXECUCOES[n]
+        elif n.startswith("sustentad"):
+            r["sustentada"] = True
+        elif n:
+            r["especial"].append(parte)
+    return r
+
+
+def separa_nome_paren(s: str):
+    """'Ataque Pesado (Livre)' -> ('Ataque Pesado', 'Livre'); sem parênteses -> (s, None)."""
+    m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", s)
+    if m and (re.search(r"pm", norm(m.group(2))) or norm(m.group(2).split(",")[0]) in EXECUCOES):
+        return m.group(1).strip(), m.group(2)
+    return s.strip(), None
+
+
+# ---------------------------------------------------------------- partes da ficha
+
+def parse_ataques(txt: str, categoria: str, avisos: list) -> list[dict]:
+    ataques = []
+    for peca in dividir_topo(txt.rstrip(". ")):
+        m = re.match(r"^(.+?)\s+([+\-–]\d+)\s*\((.*)\)$", peca)
+        if not m:
+            avisos.append(f"ataque não entendido: '{peca}'")
+            continue
+        nome, bonus, dentro = m.group(1).strip(), num(m.group(2)), m.group(3)
+        qtd = 1
+        pal = nome.split(" ", 1)
+        if len(pal) == 2 and norm(pal[0]) in NUMERAIS:
+            qtd, nome = NUMERAIS[norm(pal[0])], pal[1]
+            if nome.endswith("s") and not nome.endswith("ões"):
+                nome = nome[:-1]                     # "garras" -> "garra"
+        nome = nome[0].upper() + nome[1:]
+        at = {"nome": nome, "qtd": qtd, "bonus": bonus, "categoria": categoria,
+              "dano": "", "tipo": None, "criticoM": 20, "criticoX": 2,
+              "dano_extra": [], "extras": [], "texto": peca}
+        partes = dividir_topo(dentro, seps=(", ",))
+        dm = re.match(rf"^({DADO})(?:\s+(\w+))?(.*)$", partes[0])
+        if dm:
+            at["dano"] = dm.group(1).replace(" ", "").replace("–", "-")
+            resto = dm.group(3).strip()
+            if dm.group(2):
+                td = tipo_dano(dm.group(2))
+                if td:
+                    at["tipo"] = td
+                else:
+                    resto = (dm.group(2) + " " + resto).strip()
+            for mais in re.split(r"\s*\bmais\b\s*", resto):
+                if not mais:
+                    continue
+                em = re.match(rf"^({DADO})\s+(?:de\s+)?(\w+)", mais)
+                if em and tipo_dano(em.group(2)):
+                    at["dano_extra"].append((em.group(1).replace(" ", ""), tipo_dano(em.group(2))))
+                else:
+                    at["extras"].append(mais.strip())
+        else:
+            avisos.append(f"dano não entendido em '{peca}'")
+        for p in partes[1:]:
+            cm = re.match(r"^(\d+)?\s*/?\s*(?:x(\d+))?$", p.strip())
+            if cm and (cm.group(1) or cm.group(2)):
+                if cm.group(1):
+                    at["criticoM"] = int(cm.group(1))
+                if cm.group(2):
+                    at["criticoX"] = int(cm.group(2))
+            else:
+                at["extras"].append(p)
+        ataques.append(at)
+    return ataques
+
+
+def parse_resistencias(txt: str) -> dict:
+    r = {"imunidades": [], "ic": [], "ic_custom": [], "reducoes": {}, "vulnerab": [], "outros": []}
+    if not txt:
+        return r
+    chaves = ("imunidade", "reducao", "resistencia", "vulnerabilidade", "cura acelerada")
+    clausulas: list[str] = []
+    for ch in [c.strip() for c in txt.split(",")]:
+        if not clausulas or norm(ch).startswith(chaves):
+            clausulas.append(ch)
+        else:
+            clausulas[-1] += ", " + ch
+    for c in clausulas:
+        n = norm(c)
+        if n.startswith("imunidade"):
+            lista = re.sub(r"^imunidades? (?:a|ao|aos|as|à|às)\s+", "", c, flags=re.I)
+            for item in dividir_topo(lista, seps=(", ", " e ")):
+                td = tipo_dano(item)
+                if td:
+                    r["imunidades"].append(td)
+                elif condicao_ic(item):
+                    r["ic"].append(condicao_ic(item))
+                else:
+                    r["ic_custom"].append(item)
+        elif n.startswith("reducao de"):
+            m = re.match(r"reducao de (.+?) (\d+)(.*)$", n)
+            if m:
+                for t in dividir_topo(m.group(1), seps=(", ", " e ")):
+                    td = tipo_dano(t)
+                    if td:
+                        r["reducoes"][td] = int(m.group(2))
+                    else:
+                        r["outros"].append(c)
+            else:
+                r["outros"].append(c)
+        elif n.startswith("vulnerabilidade"):
+            lista = re.sub(r"^vulnerabilidades? (?:a|ao|aos)\s+", "", n)
+            for item in dividir_topo(lista, seps=(", ", " e ")):
+                td = tipo_dano(item)
+                (r["vulnerab"] if td else r["outros"]).append(td or c)
+        else:
+            r["outros"].append(c)
+    return r
+
+
+def parse_deslocamento(txt: str) -> dict:
+    d = {"walk": 0, "fly": 0, "swim": 0, "climb": 0, "burrow": 0}
+    nomes = {"voo": "fly", "natacao": "swim", "escalar": "climb", "escalada": "climb",
+             "escavar": "burrow", "escavacao": "burrow"}
+    for parte in dividir_topo(txt, seps=(", ",)):
+        n = norm(parte)
+        m = re.match(r"(?:(\w+)\s+)?(\d+(?:,\d+)?)\s*m", n)
+        if not m:
+            continue
+        val = float(m.group(2).replace(",", "."))
+        val = int(val) if val.is_integer() else val
+        d[nomes.get(m.group(1), "walk") if m.group(1) else "walk"] = val
+    return d
+
+
+# ---------------------------------------------------------------- principal
+
+def parse(texto: str) -> dict:
+    linhas = linhas_logicas(texto)
+    avisos: list[str] = []
+    f: dict = {"nome": "", "nd": "", "tipo": "", "raca": "", "tamanho": "med", "papel": "",
+               "iniciativa": 0, "percepcao": 0, "sentidos": [], "sentidos_custom": [],
+               "defesa": 10, "fort": 0, "ref": 0, "von": 0, "resist_texto": "",
+               "resist": parse_resistencias(""), "pv": 0, "pm": 0,
+               "deslocamento": parse_deslocamento(""), "ataques": [],
+               "ataques_texto": {"cac": "", "ad": ""}, "habilidades": [],
+               "magias_info": None, "magias": [], "atributos": {}, "pericias": {},
+               "equipamento": "", "tesouro": "", "avisos": avisos}
+
+    # ---- cabeçalho (antes do primeiro rótulo em negrito)
+    i = 0
+    cab = []
+    while i < len(linhas) and not linhas[i].startswith("**"):
+        cab.append(linhas[i])
+        i += 1
+    for c in cab:
+        m = re.search(r"\bND\s*([\d/]+)", c)
+        if m:
+            f["nd"] = m.group(1)
+            c = c.replace(m.group(0), "").strip()
+            if not c:
+                continue
+        nc = norm(limpa_md(c))
+        tam = next((v for k, v in TAMANHOS.items() if re.search(rf"\b{k}\b", nc)), None)
+        if tam and f["nome"]:
+            f["tamanho"] = tam
+            f["tipo"] = next((v for k, v in TIPOS.items() if nc.startswith(k)), "")
+            if not f["tipo"]:
+                avisos.append(f"tipo de criatura não reconhecido: '{c}'")
+            rm = re.search(r"\(([^)]+)\)", c)
+            if rm:
+                f["raca"] = rm.group(1).strip()
+            pm_ = re.search(r"\[(\w+)\]", nc)
+            if pm_:
+                f["papel"] = PAPEIS.get(pm_.group(1), "")
+        elif not f["nome"]:
+            f["nome"] = limpa_md(c)
+    # Title() deixa "Dragão Celestial Jovem" ok; conectivos minúsculos:
+    f["nome"] = titulo(f["nome"])
+
+    magia_atual = False
+    for ln in linhas[i:]:
+        if ln.startswith("•"):
+            if not magia_atual:
+                avisos.append(f"item de lista fora de Magias: '{ln[:50]}'")
+                continue
+            corpo = limpa_md(ln.lstrip("• "))
+            corpo = re.sub(r"[^\w\s()\-–,.;:'\"“”!?/+%ºª°]", "", corpo).strip()
+            m = re.match(r"^(.+?)\s*\(([^()]*)\)\s*(.*)$", corpo)
+            if not m:
+                avisos.append(f"magia não entendida: '{corpo[:60]}'")
+                continue
+            ex = cabecalho_execucao(m.group(2))
+            f["magias"].append({"nome": m.group(1).strip(), **ex, "paren": m.group(2).strip(),
+                                "texto": m.group(3).strip()})
+            continue
+
+        mrot = re.match(r"^\*\*(.+?)\*\*\s*(.*)$", ln)
+        if not mrot:
+            avisos.append(f"linha ignorada: '{ln[:60]}'")
+            continue
+        rot, resto = mrot.group(1).strip(), mrot.group(2).strip()
+        nr = norm(rot)
+        magia_atual = False
+
+        if nr == "iniciativa":
+            plano = limpa_md(ln)
+            m = re.search(r"Iniciativa\s*([+\-–]\d+)", plano, re.I)
+            f["iniciativa"] = num(m.group(1)) if m else 0
+            m = re.search(r"Percep[çcÇC][ãaÃA]o\s*([+\-–]\d+)\s*,?\s*(.*)$", plano, re.I)
+            if m:
+                f["percepcao"] = num(m.group(1))
+                for s in dividir_topo(m.group(2).rstrip("."), seps=(", ",)):
+                    k = SENTIDOS.get(norm(s))
+                    (f["sentidos"] if k else f["sentidos_custom"]).append(k or s)
+        elif nr == "defesa":
+            plano = limpa_md(ln)
+            m = re.match(r"Defesa\s*(\d+)\s*,\s*Fort\s*([+\-–]\d+)\s*,\s*Ref\s*([+\-–]\d+)\s*,"
+                         r"\s*Von\s*([+\-–]\d+)\s*,?\s*(.*)$", plano, re.I)
+            if m:
+                f["defesa"] = int(m.group(1))
+                f["fort"], f["ref"], f["von"] = (num(m.group(k)) for k in (2, 3, 4))
+                f["resist_texto"] = m.group(5).rstrip(". ")
+                f["resist"] = parse_resistencias(f["resist_texto"])
+            else:
+                avisos.append(f"linha de Defesa não entendida: '{plano}'")
+        elif nr == "pontos de vida":
+            f["pv"] = int(re.match(r"\d+", resto).group(0))
+        elif nr == "pontos de mana":
+            f["pm"] = int(re.match(r"\d+", resto).group(0))
+        elif nr == "deslocamento":
+            f["deslocamento"] = parse_deslocamento(resto)
+        elif nr in ("corpo a corpo", "a distancia"):
+            cat = "cac" if nr == "corpo a corpo" else "ad"
+            f["ataques_texto"][cat] = limpa_md(resto)
+            f["ataques"] += parse_ataques(limpa_md(resto), cat, avisos)
+        elif nr == "magias":
+            info = {"texto": limpa_md(resto), "classe": "", "nivel": 0, "cd": None, "limite": None}
+            m = re.search(r"como um[a]? (\w+)", norm(resto))
+            if m:
+                info["classe"] = m.group(1)
+            for chave, rx in (("nivel", r"(\d+)\s*[º°o]\s*nivel"), ("cd", r"cd\s*(\d+)"),
+                              ("limite", r"limite de pm\s*(\d+)")):
+                m = re.search(rx, norm(resto))
+                if m:
+                    info[chave] = int(m.group(1))
+            f["magias_info"] = info
+            magia_atual = True
+        elif nr == "for":
+            for a, v in re.findall(r"\b(For|Des|Con|Int|Sab|Car)\s+([+\-–]?\d+|—|–)", limpa_md(ln), re.I):
+                f["atributos"][a.lower()] = num(v) if re.search(r"\d", v) else 0
+        elif nr == "pericias":
+            for p in dividir_topo(limpa_md(resto).rstrip("."), seps=(", ",)):
+                m = re.match(r"^(.+?)\s*([+\-–]\d+)$", p)
+                if not m:
+                    avisos.append(f"perícia não entendida: '{p}'")
+                    continue
+                nome = norm(re.sub(r"\(.*?\)", "", m.group(1)))
+                k = PERICIAS.get(nome)
+                if k:
+                    f["pericias"][k] = num(m.group(2))
+                else:
+                    avisos.append(f"perícia desconhecida: '{p}'")
+        elif nr in ("equipamento", "tesouro"):
+            plano = re.split(r"\*\*Tesouro\*\*", ln, flags=re.I)
+            if nr == "equipamento":
+                f["equipamento"] = limpa_md(re.sub(r"^\*\*Equipamento\*\*", "", plano[0], flags=re.I)).rstrip(". ")
+                if len(plano) > 1:
+                    f["tesouro"] = limpa_md(plano[1]).rstrip(". ")
+            else:
+                f["tesouro"] = limpa_md(resto).rstrip(". ")
+        else:
+            nome, paren = separa_nome_paren(rot)
+            if paren is None and resto.startswith("("):
+                m = re.match(r"^\(([^()]*)\)\s*(.*)$", resto)
+                if m and separa_nome_paren(f"x ({m.group(1)})")[1] is not None:
+                    paren, resto = m.group(1), m.group(2)
+            ex = cabecalho_execucao(paren) if paren else cabecalho_execucao("")
+            if nome.isupper() and len(nome) > 3:
+                nome = titulo(nome)
+            f["habilidades"].append({"nome": nome, **ex, "texto": limpa_md(resto)})
+
+    if not f["atributos"]:
+        avisos.append("atributos não encontrados")
+    if not f["papel"]:
+        f["papel"] = "solo"
+        avisos.append("papel (solo/especial/lacaio) não indicado; usando 'solo'")
+    return f
+
+##### ARQUIVO: t20conv/regras.py #####
+"""Motor de regras: texto de habilidade/magia -> rolagens e efeitos do sistema Tormenta20.
+
+Convenções seguidas (levantadas do compêndio ameacas-de-arton-cdm):
+  * bônus condicional em ataques ...... efeito onuse+attack no poder, changes 'dano'/'ataque' modo 2
+  * bônus condicional em testes ....... efeito onuse+skill, items="Vontade;Reflexos", change 'roll' modo 2
+  * resistência a magia +N ............ idem, items="Vontade;Reflexos;Fortitude"
+  * reduzir execução (Magia Acelerada)  efeito onuse+spell, change 'execucao' modo 5, flag custo
+  * buff aplicado ao usar ............. efeito durationScene (transfer False, disabled False)
+  * buff gatilho/condicional .......... efeito alternável no ator (transfer True, disabled True)
+  * manobra (teste +N) ................ rolagem 'formula' d20+N com o nome da manobra
+Melhoria sobre o feito à mão: dano extra leva o tipo no próprio dado ("1d10[trevas]").
+"""
+from __future__ import annotations
+
+import copy
+import json
+import re
+from pathlib import Path
+
+from .biblioteca import novo_id
+from .parser import PERICIAS, dividir_topo, norm, tipo_dano
+
+ESQ = json.loads((Path(__file__).parent / "esqueletos.json").read_text(encoding="utf-8"))
+
+DADO = r"\d+d\d+(?:\s*[+\-–]\s*\d+)?"
+ATRIBUTOS = {"forca": "for", "destreza": "des", "constituicao": "con", "inteligencia": "int",
+             "sabedoria": "sab", "carisma": "car"}
+NOME_PERICIA = {"acro": "Acrobacia", "ades": "Adestramento", "atle": "Atletismo", "atua": "Atuação",
+                "cava": "Cavalgar", "conh": "Conhecimento", "cura": "Cura", "dipl": "Diplomacia",
+                "enga": "Enganação", "fort": "Fortitude", "furt": "Furtividade", "guer": "Guerra",
+                "inic": "Iniciativa", "inti": "Intimidação", "intu": "Intuição", "inve": "Investigação",
+                "joga": "Jogatina", "ladi": "Ladinagem", "luta": "Luta", "mist": "Misticismo",
+                "nobr": "Nobreza", "ofi0": "Ofício", "perc": "Percepção", "pilo": "Pilotagem",
+                "pont": "Pontaria", "refl": "Reflexos", "reli": "Religião", "sobr": "Sobrevivência",
+                "vont": "Vontade"}
+RESIST = {"fort": "Fortitude", "fortitude": "Fortitude", "ref": "Reflexos", "reflexos": "Reflexos",
+          "von": "Vontade", "vontade": "Vontade"}
+ALCANCES = {"curto": "short", "medio": "medium", "longo": "long"}
+CONDICIONAL = re.compile(r"\b(quando|contra|se\b|enquanto|sempre que|caso|ao\b|apos|desde que|"
+                         r"uma vez por|para cada)\b")
+DURACAO = re.compile(r"(por (?:1|uma) (?:rodada|turno)|ate o (?:inicio|fim) de seu proximo turno|"
+                     r"ate o fim da cena|por um dia|por 1 dia|pela cena|sustentad)")
+
+
+def limpa_formula(f: str) -> str:
+    return re.sub(r"\s+", "", f.replace("–", "-"))
+
+
+# ---------------------------------------------------------------- fábricas
+
+def efeito(nome: str, changes: list, *, onuse=False, attack=False, skill=False, spell=False,
+           self_=False, items="", custo="", transfer=True, disabled=True, rounds=None,
+           cena=False, aumenta=False) -> dict:
+    e = copy.deepcopy(ESQ["efeito"])
+    e["_id"] = novo_id()
+    e["name"] = nome
+    e["changes"] = [{"key": k, "mode": m, "value": str(v), "priority": 0} for k, m, v in changes]
+    e["transfer"], e["disabled"] = transfer, disabled
+    e["duration"]["rounds"] = rounds
+    e["flags"]["tormenta20"].update(onuse=onuse, attack=attack, skill=skill, spell=spell,
+                                    self=self_, items=items, custo=str(custo or ""),
+                                    durationScene=cena, aumenta=aumenta)
+    return e
+
+
+def rolagem(nome: str, tipo: str, partes: list, i: int) -> dict:
+    return {"name": nome, "key": f"{tipo}{i}", "type": tipo,
+            "parts": [list(p) for p in partes], "versatil": ""}
+
+
+# ---------------------------------------------------------------- extratores
+
+def rolagens_de_dano(texto: str) -> list[dict]:
+    """'XdY pontos de dano de T [mais XdY pontos de dano de U]' -> rolagens (ignora '+XdY' = bônus)."""
+    rx = re.compile(rf"(?<![+\d])({DADO})\s+(?:pontos\s+)?de\s+dano(?:\s+de\s+([a-zà-ú]+))?", re.I)
+    grupos: list[list] = []
+    fim_ant = None
+    for m in rx.finditer(texto):
+        parte = [limpa_formula(m.group(1)), tipo_dano(m.group(2)) if m.group(2) else "", ""]
+        entre = texto[fim_ant:m.start()] if fim_ant is not None else ""
+        if grupos and re.fullmatch(r"\s*(?:mais|e|\+)\s*", entre):
+            grupos[-1][1].append(parte)
+        else:
+            antes = norm(texto[max(0, m.start() - 90):m.start()])
+            nome = "Sopro" if "sopr" in antes else "Dano"
+            grupos.append([nome, [parte]])
+        fim_ant = m.end()
+    for m in re.finditer(rf"\b(?:cura|curam|recupera|recuperam)\s+({DADO})(?:\s*(?:PV|pontos de vida))?", texto, re.I):
+        grupos.append(["Cura", [[limpa_formula(m.group(1)), "curapv", ""]]])
+    for m in re.finditer(rf"\bperdem?\s+({DADO})\s*(?:PV|pontos de vida)", texto, re.I):
+        grupos.append(["Perda de PV", [[limpa_formula(m.group(1)), "perda", ""]]])
+    for m in re.finditer(rf"({DADO})\s*(?:PV|pontos de vida) tempor[aá]rios", texto, re.I):
+        grupos.append(["PV Temporário", [[limpa_formula(m.group(1)), "curatpv", ""]]])
+    vistos, saida = {}, []
+    for nome, partes in grupos:
+        vistos[nome] = vistos.get(nome, 0) + 1
+        rot = nome if vistos[nome] == 1 else f"{nome} ({vistos[nome]})"
+        saida.append(rolagem(rot, "dano", partes, len(saida)))
+    return saida
+
+
+MANOBRAS = ("agarrar", "derrubar", "empurrar", "desarmar", "quebrar", "atropelar", "fintar")
+
+
+def rolagem_teste(texto: str, nome_hab: str = "") -> list[dict]:
+    """'manobra derrubar ou empurrar ... (teste +19)' -> formula d20+19."""
+    out = []
+    manobra_nome = next((mb.capitalize() for mb in MANOBRAS if mb in norm(nome_hab)), None)
+    for m in re.finditer(r"\(teste\s*([+\-–]\d+)\)", texto):
+        antes = norm(texto[max(0, m.start() - 160):m.start()])
+        mm = re.findall(r"manobras? (\w+)(?: ou (\w+))?", antes)
+        nome = manobra_nome or "Teste"
+        if mm:
+            nome = " ou ".join(x.capitalize() for x in mm[-1] if x)
+        out.append(rolagem(nome, "formula", [[f"d20+{int(m.group(1).replace('–', '-').lstrip('+'))}", "", ""]], len(out)))
+    return out
+
+
+def resistencia(texto: str) -> str:
+    m = re.search(r"\((Fort|Ref|Von|Fortitude|Reflexos|Vontade)\b(?:\s+CD\s+(\d+))?\s*([^)]*)\)", texto)
+    if not m:
+        return ""
+    txt = f"{RESIST[norm(m.group(1))]} {m.group(3).strip()}".strip()
+    return txt + (f" (CD {m.group(2)})" if m.group(2) else "")
+
+
+def alcance(texto: str) -> str:
+    m = re.search(r"alcance (curto|m[eé]dio|longo)", texto)
+    return ALCANCES[norm(m.group(1))] if m else ""
+
+
+def lista_alvos(lista: str) -> list[str]:
+    return [x for x in dividir_topo(lista, seps=(", ", " e ")) if x]
+
+
+def mudancas_buff(texto: str, notas: list) -> list[tuple]:
+    """Bônus numéricos que um buff concede -> changes (chave, modo, valor)."""
+    ch = []
+    t = texto
+    for m in re.finditer(r"\+(\d+) (?:na|em) Defesa", t):
+        ch.append(("system.attributes.defesa.bonus", 2, m.group(1)))
+    for m in re.finditer(r"\+(\d+) em ((?:[A-ZÀ-Ú][\wçãéíóú]+(?:,\s*| e )?)+)", t):
+        for alvo in lista_alvos(m.group(2)):
+            n = norm(alvo)
+            if n in ATRIBUTOS:
+                ch.append((f"system.atributos.{ATRIBUTOS[n]}.value", 2, m.group(1)))
+            elif n in PERICIAS:
+                ch.append((f"system.pericias.{PERICIAS[n]}.bonus", 2, m.group(1)))
+    for m in re.finditer(r"(?<![\dd])\+(\d+) (?:em|nos) testes de (ataque|resist[eê]ncia)"
+                         r"( e (?:em |nas )?rolagens de dano)?([^.;]{0,40})", t):
+        if norm(m.group(2)) == "ataque":
+            cauda = norm(m.group(4) or "")
+            alvo = "cac" if "corpo a corpo" in cauda else "ad" if "distancia" in cauda else "geral"
+            ch.append((f"system.modificadores.ataque.{alvo}", 2, m.group(1)))
+            if m.group(3):
+                ch.append((f"system.modificadores.dano.{alvo}", 2, m.group(1)))
+        else:
+            ch += [(f"system.pericias.{k}.bonus", 2, m.group(1)) for k in ("fort", "refl", "vont")]
+    for m in re.finditer(r"(?<![\dd])\+(\d+) (?:em|nas) rolagens de dano", t):
+        ch.append(("system.modificadores.dano.geral", 2, m.group(1)))
+    for m in re.finditer(r"redu[cç][aã]o de ([a-zà-ú]+(?:(?:, | e )[a-zà-ú]+)*) (\d+)", t):
+        for tp in lista_alvos(m.group(1)):
+            td = tipo_dano(tp)
+            if td:
+                ch.append((f"system.tracos.resistencias.{td}.bonus", 2, m.group(2)))
+    for m in re.finditer(r"deslocamento de (voo|nata[cç][aã]o|escalada|escalar) (\d+)\s*m", t):
+        k = {"voo": "fly", "natacao": "swim", "escalada": "climb", "escalar": "climb"}[norm(m.group(1))]
+        ch.append((f"system.attributes.movement.{k}", 5, m.group(2)))
+    if re.search(r"resist[eê]ncia a magia \+\d+", t):
+        notas.append("resistência a magia do buff não tem campo próprio; aplique manualmente")
+    if "camuflagem" in norm(t):
+        notas.append("camuflagem não é automatizável (só texto)")
+    return ch
+
+
+def duracao_buff(texto: str) -> tuple[int | None, bool]:
+    n = norm(texto)
+    if re.search(r"por (?:1|uma) (?:rodada|turno)|ate o (?:inicio|fim) de seu proximo turno", n):
+        return 1, False
+    return None, True
+
+
+def bonus_ataque(nome: str, texto: str, notas: list) -> list[dict]:
+    """Bônus condicionais aplicados a ataques (ex.: Avesso à Honra)."""
+    ch = []
+    for m in re.finditer(rf"(?<![\dd])\+({DADO}|\d+)\s+(?:pontos\s+de\s+dano|de\s+dano|dano)(?:\s+de\s+([a-zà-ú]+))?", texto):
+        f, tp = limpa_formula(m.group(1)), tipo_dano(m.group(2)) if m.group(2) else None
+        if tp and tp != "dano":
+            f = f"{f}[{tp}]"
+        ch.append(("dano", 2, f))
+    for m in re.finditer(r"(?<![\dd])\+(\d+) (?:em|n[oa]s?) (?:seus )?(?:testes? de ataque|ataques?)( e (?:em |nas )?rolage(?:m|ns) de dano)?", texto):
+        ch.append(("ataque", 2, m.group(1)))
+        if m.group(2):
+            ch.append(("dano", 2, m.group(1)))
+    for m in re.finditer(rf"(?<![\dd])\+({DADO}|\d+) (?:em|n[ao]s?) rolage(?:m|ns) de dano", texto):
+        ch.append(("dano", 2, limpa_formula(m.group(1))))
+    for m in re.finditer(r"\+(\d+) na margem de amea[cç]a", texto):
+        ch.append(("criticoM", 2, f"-{m.group(1)}"))
+    if not ch:
+        return []
+    return [efeito(f"{nome}: {texto}", ch, onuse=True, attack=True)]
+
+
+def bonus_testes(nome: str, texto: str) -> list[dict]:
+    """'+N em testes de Percepção e Vontade quando...' / 'resistência a magia +N'."""
+    out = []
+    sa = re.search(r"soma (?:seu|sua) (Força|Destreza|Constituição|Inteligência|Sabedoria|Carisma) "
+                   r"(?:em|nos|a) (?:um )?testes? de ((?:[\wÀ-ú]+(?:,\s*| e | ou )?)+)", texto)
+    if sa:
+        attr = ATRIBUTOS[norm(sa.group(1))]
+        pers = [NOME_PERICIA[PERICIAS[norm(a)]] for a in dividir_topo(sa.group(2), seps=(", ", " e ", " ou "))
+                if norm(a) in PERICIAS]
+        out.append(efeito(f"{nome}: {texto}", [("roll", 2, f"@{attr}")], onuse=True, skill=True,
+                          items=";".join(pers)))
+    m = re.search(r"resist[eê]ncia a magia \+(\d+)", texto)
+    if m:
+        out.append(efeito(f"{nome}: resistência a magia +{m.group(1)}", [("roll", 2, m.group(1))],
+                          onuse=True, skill=True, items="Vontade;Reflexos;Fortitude"))
+    for m in re.finditer(r"\+(\d+) em (?:testes de )?((?:[A-ZÀ-Ú][\wçãéíóú]+(?:,\s*| e )?)+)", texto):
+        pers = [NOME_PERICIA[PERICIAS[norm(a)]] for a in lista_alvos(m.group(2)) if norm(a) in PERICIAS]
+        if pers:
+            out.append(efeito(f"{nome}: {texto}", [("roll", 2, m.group(1))], onuse=True, skill=True,
+                              items=";".join(pers)))
+    return out
+
+
+# ---------------------------------------------------------------- habilidade (poder)
+
+def automatizar_habilidade(h: dict) -> dict:
+    """h = {nome, execucao, custo, sustentada, texto} -> {rolls, effects, resistencia, alcance, notas}."""
+    nome, txt = h["nome"], h["texto"]
+    n = norm(txt)
+    notas: list[str] = []
+    r = {"rolls": [], "effects": [], "resistencia": resistencia(txt), "alcance": alcance(txt),
+         "notas": notas, "decidido": False}
+
+    if "ja contabilizad" in n:
+        # tira as orações marcadas como já somadas na ficha e analisa o resto
+        resto = re.sub(r"[^.;]*?\((?:j[aá] )?contabilizad[oa]s?\)", "", txt, flags=re.I)
+        resto = re.sub(r"^\s*(?:e|,)\s*", "", resto).strip(" .,;")
+        notas.append("trecho 'já contabilizado' ignorado para não somar duas vezes")
+        if len(norm(resto)) < 12:
+            r["decidido"] = True
+            return r
+        txt, n = resto, norm(resto)
+
+    # Execução acelerada (Magia Acelerada e afins)
+    if re.search(r"muda a execu[cç][aã]o (?:dela|dele|da magia|de uma magia)? ?para livre", txt):
+        r["effects"].append(efeito(nome, [("execucao", 5, "livre")], onuse=True, spell=True,
+                                   custo=h.get("custo") or ""))
+        return r
+
+    r["rolls"] = rolagens_de_dano(txt) + rolagem_teste(txt, nome)
+
+    condicional = bool(CONDICIONAL.search(n))
+    com_duracao = bool(DURACAO.search(n))
+    sobre_ataque = re.search(r"\bataques?\b|\bacert", n)
+
+    if sobre_ataque and not com_duracao:
+        r["effects"] += bonus_ataque(nome, txt, notas)
+
+    if not r["effects"]:
+        r["effects"] += bonus_testes(nome, txt) if (condicional or "resistencia a magia" in n) and not com_duracao else []
+
+    if not r["effects"] and "recebe" in n and com_duracao:
+        ch = mudancas_buff(txt, notas)
+        if ch:
+            rounds, cena = duracao_buff(txt)
+            if h.get("execucao") and not condicional:
+                # usada ativamente: aplica ao usar (convenção dos buffs de magia/poder)
+                r["effects"].append(efeito(nome, ch, transfer=False, disabled=False, rounds=rounds, cena=cena))
+            else:
+                # gatilho: efeito alternável no ator
+                r["effects"].append(efeito(f"{nome} (ativo)", ch, transfer=True, disabled=True, rounds=rounds))
+
+    if not r["rolls"] and not r["effects"]:
+        if not condicional and re.search(r"\+\d+ em|\+\d+ na", txt):
+            notas.append("bônus permanente: já está somado nos números da ficha")
+            r["decidido"] = True
+        else:
+            notas.append("sem automação (só texto)")
+    return r
+
+
+# ---------------------------------------------------------------- magia
+
+def automatizar_magia(m: dict) -> dict:
+    txt = m["texto"]
+    notas: list[str] = []
+    r = {"rolls": rolagens_de_dano(txt) + rolagem_teste(txt), "effects": [], "notas": notas,
+         "resistencia": "", "alcance": alcance(txt), "ataques_extras": []}
+    mr = re.search(r"\((Fort|Ref|Von)\w*\s+([^)]*)\)", txt)
+    if mr:
+        r["resistencia"] = f"{RESIST[norm(mr.group(1))]} {mr.group(2).strip()}"
+    if "recebe" in norm(txt):
+        ch = mudancas_buff(txt, notas)
+        if ch:
+            rounds, cena = duracao_buff(txt)
+            r["effects"].append(efeito(m["nome"], ch, transfer=False, disabled=False,
+                                       rounds=rounds, cena=cena))
+    # ataque concedido pela magia: "ataque de mordida (ataque +30, dano 1d6+15, 19/x3)"
+    for a in re.finditer(r"ataque de (\w+) \(ataque ([+\-–]\d+), dano ([^,)]+)(?:,\s*([^)]+))?\)", txt):
+        r["ataques_extras"].append({"nome": a.group(1), "bonus": int(a.group(2).replace("–", "-")),
+                                    "dano": limpa_formula(a.group(3)), "crit": a.group(4) or ""})
+    if not r["rolls"] and not r["effects"]:
+        notas.append("sem automação (só texto)")
+    return r
+
+##### ARQUIVO: t20conv/construtor.py #####
+"""Ficha estruturada -> JSON de ator NPC do Foundry (sistema tormenta20)."""
+from __future__ import annotations
+
+import copy
+import html
+import json
+import re
+from pathlib import Path
+
+from .biblioteca import Biblioteca, novo_id
+from .parser import norm
+from .regras import (ESQ, automatizar_habilidade, automatizar_magia, bonus_testes, efeito,
+                     rolagem)
+
+TEMPLATE = json.loads((Path(__file__).parent / "template_npc.json").read_text(encoding="utf-8"))
+
+# Tipos de dano canônicos (regras de T20). Prevalecem sobre a biblioteca, que tem erros manuais.
+DANO_CANONICO = {
+    "mordida": "perfuracao", "garra": "corte", "chifre": "perfuracao", "chifres": "perfuracao",
+    "pancada": "impacto", "cauda": "impacto", "ferrao": "perfuracao", "tentaculo": "impacto",
+    "bico": "perfuracao", "casco": "impacto", "cascos": "impacto", "presas": "perfuracao",
+    "adaga": "perfuracao", "espada curta": "perfuracao", "espada longa": "corte",
+    "espada bastarda": "corte", "montante": "corte", "cimitarra": "corte", "florete": "perfuracao",
+    "machadinha": "corte", "machado de batalha": "corte", "machado de guerra": "corte",
+    "machado anao": "corte", "alabarda": "corte", "foice": "corte", "gadanho": "corte",
+    "lanca": "perfuracao", "azagaia": "perfuracao", "tridente": "perfuracao", "pique": "perfuracao",
+    "lanca montada": "perfuracao", "picareta": "perfuracao", "maca": "impacto", "clava": "impacto",
+    "tacape": "impacto", "bordao": "impacto", "martelo de guerra": "impacto", "marreta": "impacto",
+    "mangual": "impacto", "manopla": "impacto", "chicote": "corte", "katana": "corte",
+    "wakizashi": "corte", "tetsubo": "impacto", "kama": "corte", "nunchaku": "impacto",
+    "arco curto": "perfuracao", "arco longo": "perfuracao", "besta leve": "perfuracao",
+    "besta pesada": "perfuracao", "funda": "impacto", "pistola": "perfuracao",
+    "mosquete": "perfuracao", "ataque desarmado": "impacto",
+}
+NATURAIS = {"mordida", "garra", "chifre", "chifres", "pancada", "cauda", "ferrao", "tentaculo",
+            "bico", "casco", "cascos", "presas", "pinca", "asa", "asas", "ferroada", "toque",
+            "esporao", "patas", "pata", "chicote de cauda"}
+NUMERAL_TXT = {2: "Duas", 3: "Três", 4: "Quatro", 5: "Cinco", 6: "Seis"}
+TOKEN = {"min": 1, "peq": 1, "med": 1, "gra": 2, "eno": 3, "col": 4}
+CLASSE_TIPO = {"mago": "arc", "feiticeiro": "arc", "bruxo": "arc", "arcanista": "arc", "bardo": "arc",
+               "clerigo": "div", "druida": "div", "paladino": "div", "sacerdote": "div"}
+
+
+def p(txt: str) -> str:
+    return f"<p>{html.escape(txt, quote=False)}</p>"
+
+
+def singular(n: str) -> str:
+    n = norm(n)
+    return n[:-1] if n.endswith("s") and n[:-1] in DANO_CANONICO | {k: 0 for k in NATURAIS} else n
+
+
+class Construtor:
+    def __init__(self, bib: Biblioteca, img_padrao: str = "icons/svg/mystery-man.svg"):
+        self.bib = bib
+        self.img_padrao = img_padrao
+
+    # ------------------------------------------------------------ itens
+    def _item(self, tipo: str, nome: str) -> dict:
+        it = copy.deepcopy(ESQ[tipo])
+        it["_id"] = novo_id()
+        it["name"] = nome
+        return it
+
+    def arma(self, at: dict, f: dict, rel: dict) -> dict:
+        nome_base = at["nome"]
+        nome = nome_base if at["qtd"] == 1 else f"{NUMERAL_TXT.get(at['qtd'], at['qtd'])} {nome_base}s"
+        it = self._item("arma", nome)
+        x = it["system"]
+        chave = singular(nome_base)
+        lib = self.bib.arma(nome_base) or self.bib.arma(chave) or self.bib.arma(nome) or {}
+        tipo = at["tipo"] or DANO_CANONICO.get(chave) or DANO_CANONICO.get(norm(nome_base))
+        if not tipo and lib.get("tipos"):
+            tipo = max(lib["tipos"], key=lib["tipos"].get)
+            rel["avisos"].append(f"{nome}: tipo de dano '{tipo}' veio da biblioteca (conferir)")
+        if not tipo:
+            tipo = "impacto"
+            rel["avisos"].append(f"{nome}: tipo de dano desconhecido, usei 'impacto'")
+        natural = chave in NATURAIS or norm(nome_base) in NATURAIS
+        if lib.get("img") and lib["img"] != "icons/svg/item-bag.svg":
+            it["img"] = lib["img"]
+        elif natural:
+            it["img"] = f"systems/tormenta20/icons/poderes/ameacas/{chave}.webp"
+        x["proficiencia"] = "natural" if natural else (lib.get("proficiencia") or "simples")
+        x["proposito"] = ("corpo-a-corpo" if at["categoria"] == "cac"
+                          else (lib.get("proposito") if lib.get("proposito") not in (None, "", "corpo-a-corpo") else "disparo"))
+        x["empunhadura"] = "leve" if natural else (lib.get("empunhadura") or "uma")
+        x["criticoM"], x["criticoX"] = at["criticoM"], at["criticoX"]
+        x["ataques"] = 1
+        per = "luta" if at["categoria"] == "cac" else "pont"
+        dano = [[at["dano"], tipo, ""]] + [[fm, tp, ""] for fm, tp in at["dano_extra"]]
+        x["rolls"] = [rolagem("Ataque", "ataque", [["1d20", "", ""], [per, "", ""], [str(at["bonus"]), "", ""]], 0),
+                      rolagem("Dano", "dano", dano, 1)]
+        desc = [p(at["texto"])]
+        extras = [e for e in at["extras"]]
+        if extras:
+            x["chatFlavor"] = "mais " + ", ".join(extras)
+            for e in extras:
+                hab = next((h for h in f["habilidades"] if norm(h["nome"]) == norm(e)), None)
+                if hab:
+                    desc.append(f"<p><strong>{html.escape(hab['nome'])}.</strong> {html.escape(hab['texto'])}</p>")
+        x["description"]["value"] = "".join(desc)
+        return it
+
+    def poder(self, h: dict, f: dict, rel: dict) -> dict:
+        auto = automatizar_habilidade(h)
+        tem_regra = bool(auto["rolls"] or auto["effects"])
+        reuso = None if (tem_regra or auto["decidido"]) else self.bib.poder_identico(h["nome"], h["texto"], f["nome"])
+        if reuso:
+            it = reuso["item"]
+            it["system"]["description"]["value"] = p(h["texto"])
+            rel["itens"].append(f"[biblioteca] {h['nome']} (reaproveitado de {reuso['ator']})")
+            return it
+        it = self._item("poder", h["nome"])
+        it["img"] = self.bib.img_poder(h["nome"]) or "icons/svg/item-bag.svg"
+        x = it["system"]
+        x["tipo"] = "ability"
+        x["description"]["value"] = p(h["texto"])
+        x["ativacao"].update(execucao=h["execucao"], custo=h["custo"],
+                             special=", ".join(h.get("especial") or []))
+        if h.get("sustentada"):
+            x["duracao"]["units"] = "sust"
+        x["rolls"] = auto["rolls"]
+        x["resistencia"]["txt"] = auto["resistencia"]
+        if auto["alcance"]:
+            x["alcance"] = auto["alcance"]
+        it["effects"] = auto["effects"]
+        rotulo = "[auto]" if tem_regra else "[texto]"
+        info = "; ".join(auto["notas"])
+        if not tem_regra:
+            outros = self.bib.poder_parecido(h["nome"])
+            if outros:
+                info += f" | há versão configurada à mão (texto diferente) em: {', '.join(outros)}"
+        rel["itens"].append(f"{rotulo} {h['nome']}" + (f" — {info}" if info else "")
+                            + "".join(f"\n      · {e['name'][:90]}  {[(c['key'], c['value']) for c in e['changes']]}"
+                                      for e in auto["effects"])
+                            + "".join(f"\n      · rolagem {r['name']}: {r['parts']}" for r in auto["rolls"]))
+        return it
+
+    def magia(self, m: dict, f: dict, rel: dict) -> list[dict]:
+        auto = automatizar_magia(m)
+        base = self.bib.magia(m["nome"])
+        if base:
+            it = base
+            it["_id"] = novo_id()
+            for c in ("folder", "ownership", "_stats", "sort"):
+                it.pop(c, None)
+            it["effects"] = []          # aprimoramentos descartados: a ficha já traz os valores finais
+            desc_base = it["system"]["description"]["value"]
+            desc_base = re.sub(r"<section[^>]*class=\"secret\"[^>]*>.*?</section>", "", desc_base, flags=re.S)
+        else:
+            it = self._item("magia", m["nome"])
+            desc_base = ""
+            rel["avisos"].append(f"magia '{m['nome']}' fora da biblioteca: escola/círculo em branco")
+        x = it["system"]
+        classe = (f.get("magias_info") or {}).get("classe", "")
+        if CLASSE_TIPO.get(classe):
+            x["tipo"] = CLASSE_TIPO[classe]
+        cab = "%s (%s)" % (m["nome"], m.get("paren", ""))
+        x["description"]["value"] = (f"<section class=\"secret\"><p><strong>{html.escape(cab)}</strong> "
+                                     f"{html.escape(m['texto'])}</p></section>{desc_base}")
+        x["ativacao"].update(execucao=m["execucao"], custo=m["custo"])
+        if m["sustentada"]:
+            x["duracao"]["units"] = "sust"
+        x["rolls"] = auto["rolls"]
+        if auto["resistencia"]:
+            cd = (f.get("magias_info") or {}).get("cd")
+            x["resistencia"]["txt"] = auto["resistencia"] + (f" (CD {cd})" if cd else "")
+        it["effects"] = auto["effects"]
+        rel["itens"].append(f"[magia] {m['nome']}" + ("" if base else " (sem base na biblioteca)")
+                            + "".join(f"\n      · rolagem {r['name']}: {r['parts']}" for r in auto["rolls"])
+                            + "".join(f"\n      · buff {[(c['key'], c['value']) for c in e['changes']]}" for e in auto["effects"])
+                            + ("".join(f"\n      · obs: {n}" for n in auto["notas"])))
+        itens = [it]
+        for a in auto["ataques_extras"]:
+            cm = re.match(r"(\d+)?/?x?(\d+)?", a["crit"].replace(" ", ""))
+            at = {"nome": f"{a['nome'].capitalize()} ({m['nome']})", "qtd": 1, "bonus": a["bonus"],
+                  "categoria": "cac", "dano": a["dano"], "tipo": DANO_CANONICO.get(norm(a["nome"])),
+                  "criticoM": int(cm.group(1)) if cm and cm.group(1) else 20,
+                  "criticoX": int(re.search(r"x(\d+)", a["crit"]).group(1)) if "x" in a["crit"] else 2,
+                  "dano_extra": [], "extras": [], "texto": f"Concedido por {m['nome']}."}
+            itens.append(self.arma(at, f, rel))
+            rel["itens"].append(f"[arma] {at['nome']} (criada a partir do texto da magia)")
+        return itens
+
+    # ------------------------------------------------------------ ator
+    def ator(self, f: dict) -> tuple[dict, dict]:
+        rel = {"nome": f["nome"], "itens": [], "avisos": list(f["avisos"])}
+        a = copy.deepcopy(TEMPLATE)
+        s = a["system"]
+        a["name"] = f["nome"]
+        a["img"] = self.img_padrao
+        for k, v in f["atributos"].items():
+            s["atributos"][k]["base"] = v
+        at = s["attributes"]
+        at["pv"].update(value=f["pv"], max=f["pv"])
+        at["pm"].update(value=f["pm"], max=f["pm"])
+        for k, v in f["deslocamento"].items():
+            at["movement"]["burrow" if k == "burrow" else k] = v
+        at["defesa"]["base"] = f["defesa"]
+        at["sentidos"] = {"value": f["sentidos"], "custom": ", ".join(f["sentidos_custom"])}
+        at["nd"] = f["nd"]
+
+        d = s["detalhes"]
+        d.update(tipo=f["tipo"], raca=f["raca"], role=f["papel"], resistencias=f["resist_texto"],
+                 ataquescac=f["ataques_texto"]["cac"], ataquesad=f["ataques_texto"]["ad"],
+                 equipamento=f["equipamento"], tesouro=f["tesouro"])
+
+        t = s["tracos"]
+        t["tamanho"] = f["tamanho"]
+        R = f["resist"]
+        for tp in R["imunidades"]:
+            t["resistencias"][tp]["imunidade"] = True
+        for tp, v in R["reducoes"].items():
+            t["resistencias"][tp]["base"] = v
+        for tp in R["vulnerab"]:
+            t["resistencias"][tp]["vulnerabilidade"] = True
+        t["ic"] = {"value": sorted(set(R["ic"])), "custom": "; ".join(R["ic_custom"])}
+
+        P = s["pericias"]
+        P["inic"].update(value=f["iniciativa"], treinado=True)
+        P["perc"].update(value=f["percepcao"], treinado=True)
+        P["fort"]["outros"], P["refl"]["outros"], P["vont"]["outros"] = f["fort"], f["ref"], f["von"]
+        for k, v in f["pericias"].items():
+            if k in ("fort", "refl", "vont"):
+                P[k]["outros"] = v
+            else:
+                P[k].update(value=v, treinado=True)
+
+        tam = TOKEN.get(f["tamanho"], 1)
+        tok = a["prototypeToken"]
+        tok.update(name=f["nome"], width=tam, height=tam, disposition=-1)
+        tok["texture"]["src"] = self.img_padrao
+
+        itens = []
+        for ataque in f["ataques"]:
+            itens.append(self.arma(ataque, f, rel))
+            rel["itens"].append(f"[arma] {itens[-1]['name']}: +{ataque['bonus']} "
+                                f"{[r['parts'] for r in itens[-1]['system']['rolls'] if r['type'] == 'dano'][0]} "
+                                f"crít {ataque['criticoM']}/x{ataque['criticoX']}")
+        # resistência a magia (linha de Defesa) vira poder com efeito de teste
+        for o in R["outros"]:
+            if re.search(r"resist[eê]ncia a magia \+\d+", o):
+                it = self._item("poder", o[0].upper() + o[1:])
+                it["system"]["tipo"] = "ability"
+                it["system"]["description"]["value"] = p(o)
+                it["effects"] = bonus_testes(it["name"], o)
+                itens.append(it)
+                rel["itens"].append(f"[auto] {it['name']} — efeito de teste (marcar ao resistir a magia)")
+        for h in f["habilidades"]:
+            itens.append(self.poder(h, f, rel))
+        if f["magias_info"]:
+            it = self._item("poder", "Magias")
+            it["system"]["tipo"] = "ability"
+            it["system"]["description"]["value"] = p(f["magias_info"]["texto"])
+            itens.append(it)
+            for m in f["magias"]:
+                itens += self.magia(m, f, rel)
+        a["items"] = itens
+        a["flags"] = {"t20conv": {"versao": 1}}
+        return a, rel
+
+##### ARQUIVO: t20conv/biblioteca.py #####
+"""Biblioteca de referência construída a partir de compêndios já configurados à mão
+(ex.: o módulo ameacas-de-arton-cdm e o compêndio de magias do sistema).
+
+Uso: python -m t20conv.biblioteca <fonte> [<fonte> ...] -o biblioteca.json
+  <fonte> = pasta com JSONs (um por documento, como o foundryvtt-cli gera)
+            ou arquivo .json com uma lista de documentos (como a macro exportar_compendio gera).
+Aceita atores (os itens deles entram no índice) e itens soltos.
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import copy
+import html
+import json
+import random
+import re
+import string
+from pathlib import Path
+
+from .parser import norm
+
+
+def novo_id() -> str:
+    return "".join(random.choices(string.ascii_letters + string.digits, k=16))
+
+
+def texto_puro(h: str) -> str:
+    h = re.sub(r"@UUID\[[^\]]*\]\{([^}]*)\}", r"\1", h or "")
+    h = re.sub(r"<section[^>]*class=\"secret\"[^>]*>.*?</section>", " ", h, flags=re.S)
+    h = re.sub(r"<[^>]+>", " ", h)
+    return re.sub(r"\s+", " ", html.unescape(h)).strip()
+
+
+def chave_texto(txt: str, nome_criatura: str = "") -> str:
+    n = norm(txt)
+    if nome_criatura:
+        n = n.replace(norm(nome_criatura), "<c>")
+    return re.sub(r"[^\w<>+\-/ ]", "", n).strip()
+
+
+def _docs(fonte: Path):
+    if fonte.is_dir():
+        for fp in sorted(fonte.glob("*.json")):
+            yield json.loads(fp.read_text(encoding="utf-8"))
+    else:
+        dados = json.loads(fonte.read_text(encoding="utf-8"))
+        yield from (dados if isinstance(dados, list) else [dados])
+
+
+def construir(fontes: list[Path]) -> dict:
+    poderes: dict[str, list] = collections.defaultdict(list)
+    magias: dict[str, dict] = {}
+    armas: dict[str, dict] = {}
+    tipos_arma = collections.defaultdict(collections.Counter)
+
+    def add_item(it, ator=""):
+        nome = norm(it.get("name", ""))
+        if not nome:
+            return
+        x = it.get("system", {})
+        if it["type"] == "poder":
+            txt = texto_puro(x.get("description", {}).get("value", ""))
+            poderes[nome].append({"ator": ator, "chave": chave_texto(txt, ator),
+                                  "tem_automacao": bool(it.get("effects") or x.get("rolls")),
+                                  "item": it})
+        elif it["type"] == "magia":
+            atual = magias.get(nome)
+            # prefere a versão "de livro" (sem ator) ou a primeira vista
+            if atual is None or (atual["ator"] and not ator):
+                magias[nome] = {"ator": ator, "item": it}
+        elif it["type"] == "arma":
+            for r in x.get("rolls", []):
+                if r.get("type") == "dano" and r.get("parts") and r["parts"][0][1]:
+                    tipos_arma[nome][r["parts"][0][1]] += 1
+            a = armas.setdefault(nome, {"img": it.get("img"), "proficiencia": x.get("proficiencia"),
+                                        "proposito": x.get("proposito"),
+                                        "empunhadura": x.get("empunhadura"),
+                                        "criticoM": x.get("criticoM"), "criticoX": x.get("criticoX")})
+            if a["img"] in (None, "icons/svg/item-bag.svg"):
+                a["img"] = it.get("img")
+
+    for f in fontes:
+        for d in _docs(Path(f)):
+            if d.get("type") in ("npc", "character"):
+                for it in d.get("items", []):
+                    add_item(it, d.get("name", ""))
+            elif d.get("type") in ("poder", "magia", "arma"):
+                add_item(d)
+    for n, c in tipos_arma.items():
+        armas[n]["tipos"] = dict(c)
+    return {"poderes": poderes, "magias": magias, "armas": armas}
+
+
+class Biblioteca:
+    def __init__(self, dados: dict | None = None):
+        d = dados or {"poderes": {}, "magias": {}, "armas": {}}
+        self.poderes, self.magias, self.armas = d["poderes"], d["magias"], d["armas"]
+
+    @classmethod
+    def carregar(cls, caminho: str | Path | None) -> "Biblioteca":
+        if not caminho or not Path(caminho).exists():
+            return cls()
+        return cls(json.loads(Path(caminho).read_text(encoding="utf-8")))
+
+    def poder_identico(self, nome: str, texto: str, criatura: str) -> dict | None:
+        """Poder já configurado com o MESMO texto (descontando o nome da criatura)."""
+        alvo = chave_texto(texto, criatura)
+        cands = [c for c in self.poderes.get(norm(nome), []) if c["chave"] == alvo and c["tem_automacao"]]
+        if not cands:
+            return None
+        it = copy.deepcopy(cands[0]["item"])
+        it["_id"] = novo_id()
+        for campo in ("folder", "ownership", "_stats", "sort"):
+            it.pop(campo, None)
+        for e in it.get("effects", []):
+            e["_id"] = novo_id()
+            e.pop("origin", None)
+            e.pop("_stats", None)
+        return {"item": it, "ator": cands[0]["ator"]}
+
+    def poder_parecido(self, nome: str) -> list[str]:
+        return sorted({c["ator"] for c in self.poderes.get(norm(nome), []) if c["tem_automacao"]})[:5]
+
+    def img_poder(self, nome: str) -> str | None:
+        for c in self.poderes.get(norm(nome), []):
+            img = c["item"].get("img")
+            if img and not img.startswith("icons/svg/"):
+                return img
+        return None
+
+    def magia(self, nome: str) -> dict | None:
+        m = self.magias.get(norm(nome))
+        return copy.deepcopy(m["item"]) if m else None
+
+    def arma(self, nome: str) -> dict | None:
+        return self.armas.get(norm(nome))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("fontes", nargs="+", type=Path)
+    ap.add_argument("-o", "--saida", default="biblioteca.json")
+    a = ap.parse_args()
+    dados = construir(a.fontes)
+    Path(a.saida).write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+    print(f"biblioteca: {sum(len(v) for v in dados['poderes'].values())} poderes "
+          f"({len(dados['poderes'])} nomes), {len(dados['magias'])} magias, "
+          f"{len(dados['armas'])} armas -> {a.saida}")
+
+
+if __name__ == "__main__":
+    main()
+
+##### ARQUIVO: t20conv/template_npc.json #####
+{
+ "name": "",
+ "type": "npc",
+ "img": "icons/svg/mystery-man.svg",
+ "system": {
+  "atributos": {
+   "for": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   },
+   "des": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   },
+   "con": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   },
+   "int": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   },
+   "sab": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   },
+   "car": {
+    "value": 0,
+    "bonus": 0,
+    "base": 0,
+    "racial": 0
+   }
+  },
+  "attributes": {
+   "cd": 10,
+   "pv": {
+    "value": 0,
+    "min": 0,
+    "max": 0,
+    "temp": 0
+   },
+   "pm": {
+    "value": 0,
+    "min": 0,
+    "max": 0,
+    "temp": 0
+   },
+   "movement": {
+    "burrow": 0,
+    "climb": 0,
+    "fly": 0,
+    "swim": 0,
+    "walk": 0,
+    "unit": "m",
+    "hover": false
+   },
+   "defesa": {
+    "base": 10,
+    "value": 10,
+    "outros": 0,
+    "atributo": "des",
+    "pda": 0,
+    "bonus": [],
+    "condi": 0
+   },
+   "sentidos": {
+    "value": [],
+    "custom": ""
+   },
+   "conjuracao": "int",
+   "nivel": {
+    "value": 0,
+    "xp": {
+     "value": 0,
+     "pct": 0,
+     "proximo": 0
+    }
+   },
+   "carga": {
+    "value": 0,
+    "atributo": "for",
+    "base": 10,
+    "bonus": [],
+    "max": 0,
+    "pct": 0,
+    "encumbered": false
+   },
+   "treino": 0,
+   "nd": ""
+  },
+  "detalhes": {
+   "biography": {
+    "value": "",
+    "public": ""
+   },
+   "raca": "",
+   "tipo": "",
+   "divindade": "",
+   "equipamento": "",
+   "resistencias": "",
+   "tesouro": "",
+   "role": "solo",
+   "origem": "",
+   "movimento": "",
+   "ataquescac": "",
+   "ataquesad": ""
+  },
+  "tracos": {
+   "tamanho": "med",
+   "resistencias": {
+    "perda": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "acido": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "corte": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "eletricidade": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "essencia": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "fogo": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "frio": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "impacto": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "luz": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "psiquico": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "perfuracao": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "trevas": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "imunidade": false,
+     "vulnerabilidade": false,
+     "excecao": 0
+    },
+    "dano": {
+     "value": 0,
+     "base": 0,
+     "bonus": [],
+     "excecao": 0,
+     "imunidade": false,
+     "vulnerabilidade": false
+    }
+   },
+   "ic": {
+    "value": [],
+    "custom": ""
+   }
+  },
+  "dinheiro": {
+   "tl": 0,
+   "to": 0,
+   "tp": 0,
+   "tc": 0
+  },
+  "resources": {
+   "primary": {
+    "value": 0,
+    "max": 0,
+    "label": ""
+   },
+   "secondary": {
+    "value": 0,
+    "max": 0,
+    "label": ""
+   },
+   "tertiary": {
+    "value": 0,
+    "max": 0,
+    "label": ""
+   },
+   "deathsave": {
+    "value": 0,
+    "max": 3,
+    "label": ""
+   },
+   "shadow": {
+    "value": 0,
+    "max": 5,
+    "label": ""
+   },
+   "catarse": {
+    "value": 0,
+    "max": 3,
+    "label": ""
+   }
+  },
+  "pericias": {
+   "acro": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": true,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "ades": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "atle": {
+    "value": 0,
+    "atributo": "for",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "atua": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "cava": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "conh": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "cura": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "dipl": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "enga": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "fort": {
+    "value": 0,
+    "atributo": "con",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "furt": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": true,
+    "pda": false,
+    "size": true,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "guer": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "inic": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "inti": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "intu": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "inve": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "joga": {
+    "value": 0,
+    "atributo": "car",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "ladi": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": true,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "luta": {
+    "value": 0,
+    "atributo": "for",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "mist": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "nobr": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "ofi0": {
+    "value": 0,
+    "atributo": "int",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "perc": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "pilo": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "pont": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "refl": {
+    "value": 0,
+    "atributo": "des",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "reli": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": true,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "sobr": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "vont": {
+    "value": 0,
+    "atributo": "sab",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   },
+   "_pc0": {
+    "value": 0,
+    "atributo": "for",
+    "outros": 0,
+    "treinado": false,
+    "st": false,
+    "pda": false,
+    "size": false,
+    "condi": 0,
+    "bonus": [],
+    "custom": false,
+    "label": "",
+    "nome": ""
+   }
+  },
+  "modificadores": {
+   "atributos": {
+    "for": [],
+    "des": [],
+    "con": [],
+    "int": [],
+    "sab": [],
+    "car": [],
+    "fisicos": [],
+    "mentais": [],
+    "geral": []
+   },
+   "ataque": {
+    "geral": [],
+    "cac": [],
+    "ad": []
+   },
+   "dano": {
+    "ad": [],
+    "alq": [],
+    "cac": [],
+    "geral": [],
+    "mag": []
+   },
+   "pericias": {
+    "geral": [],
+    "resistencia": [],
+    "semataque": [],
+    "ataque": [],
+    "atr": {
+     "for": [],
+     "des": [],
+     "con": [],
+     "int": [],
+     "sab": [],
+     "car": []
+    }
+   }
+  }
+ },
+ "prototypeToken": {
+  "name": "",
+  "displayName": 0,
+  "actorLink": false,
+  "appendNumber": false,
+  "prependAdjective": false,
+  "width": 1,
+  "height": 1,
+  "texture": {
+   "src": "icons/svg/mystery-man.svg",
+   "anchorX": 0.5,
+   "anchorY": 0.5,
+   "offsetX": 0,
+   "offsetY": 0,
+   "fit": "contain",
+   "scaleX": 1,
+   "scaleY": 1,
+   "rotation": 0,
+   "tint": "#ffffff",
+   "alphaThreshold": 0.75
+  },
+  "hexagonalShape": 0,
+  "lockRotation": false,
+  "rotation": 0,
+  "alpha": 1,
+  "disposition": -1,
+  "displayBars": 30,
+  "bar1": {
+   "attribute": "attributes.pv"
+  },
+  "bar2": {
+   "attribute": "attributes.pm"
+  },
+  "light": {
+   "negative": false,
+   "priority": 0,
+   "alpha": 0.5,
+   "angle": 360,
+   "bright": 0,
+   "color": null,
+   "coloration": 1,
+   "dim": 0,
+   "attenuation": 0.5,
+   "luminosity": 0.5,
+   "saturation": 0,
+   "contrast": 0,
+   "shadows": 0,
+   "animation": {
+    "type": null,
+    "speed": 5,
+    "intensity": 5,
+    "reverse": false
+   },
+   "darkness": {
+    "min": 0,
+    "max": 1
+   }
+  },
+  "sight": {
+   "enabled": false,
+   "range": 0,
+   "angle": 360,
+   "visionMode": "basic",
+   "color": null,
+   "attenuation": 0.1,
+   "brightness": 0,
+   "saturation": 0,
+   "contrast": 0
+  },
+  "detectionModes": [],
+  "occludable": {
+   "radius": 0
+  },
+  "ring": {
+   "enabled": false,
+   "colors": {
+    "ring": null,
+    "background": null
+   },
+   "effects": 1,
+   "subject": {
+    "scale": 1,
+    "texture": null
+   }
+  },
+  "flags": {},
+  "randomImg": false
+ },
+ "items": [],
+ "effects": [],
+ "flags": {}
+}
+##### ARQUIVO: t20conv/esqueletos.json #####
+{
+ "poder": {
+  "type": "poder",
+  "name": "",
+  "img": "icons/svg/item-bag.svg",
+  "system": {
+   "description": {
+    "value": "",
+    "unidentified": ""
+   },
+   "source": "",
+   "ativacao": {
+    "execucao": "",
+    "custo": 0,
+    "qtd": "",
+    "condicao": "",
+    "special": ""
+   },
+   "duracao": {
+    "value": 0,
+    "units": "",
+    "special": ""
+   },
+   "target": {
+    "value": 0,
+    "width": 0,
+    "type": ""
+   },
+   "range": {
+    "value": 0,
+    "units": ""
+   },
+   "consume": {
+    "type": "",
+    "target": "",
+    "amount": 0,
+    "mpMultiplier": false
+   },
+   "efeito": "",
+   "alcance": "none",
+   "alvo": "",
+   "area": "",
+   "resistencia": {
+    "pericia": "",
+    "atributo": "",
+    "bonus": 0,
+    "txt": ""
+   },
+   "rolls": [],
+   "tipo": "ability",
+   "subtipo": "",
+   "origin": "",
+   "tags": [],
+   "rolltags": [],
+   "chatFlavor": "",
+   "chatGif": ""
+  },
+  "effects": [],
+  "flags": {}
+ },
+ "arma": {
+  "name": "",
+  "type": "arma",
+  "img": "icons/svg/item-bag.svg",
+  "system": {
+   "description": {
+    "value": "",
+    "unidentified": ""
+   },
+   "source": "",
+   "equipado": 0,
+   "equipado2": {
+    "slot": 0,
+    "type": "hand"
+   },
+   "carregado": true,
+   "peso": 0,
+   "espacos": 0,
+   "qtd": 0,
+   "preco": 0,
+   "pv": {
+    "value": 0,
+    "min": 0,
+    "max": 0
+   },
+   "rd": 0,
+   "rolls": [],
+   "criticoM": 20,
+   "criticoX": 2,
+   "alcance": "",
+   "tipoUso": "sim",
+   "propriedades": {
+    "ada": false,
+    "agi": false,
+    "alo": false,
+    "dup": false,
+    "ver": false,
+    "des": false,
+    "hib": false
+   },
+   "origin": "",
+   "tags": [],
+   "chatFlavor": "",
+   "ativacao": {
+    "execucao": "",
+    "custo": 0,
+    "qtd": "",
+    "condicao": "",
+    "special": ""
+   },
+   "consume": {
+    "amount": null,
+    "mpMultiplier": false,
+    "type": "",
+    "target": ""
+   },
+   "encantos": {
+    "lancinante": false,
+    "keen": null,
+    "bane": null,
+    "throwable": null,
+    "assassin": null,
+    "seeking": null,
+    "frost": null,
+    "caster": null,
+    "corrosive": null,
+    "dancing": null,
+    "defending": null,
+    "destructive": null,
+    "lacerating": null,
+    "draining": null,
+    "shock": null,
+    "energy": null,
+    "excruciating": null,
+    "flaming": null,
+    "formidable": null,
+    "lancinating": false,
+    "magnificent": null,
+    "merciful": null,
+    "unholy": null,
+    "holy": null,
+    "bloodthirsty": null,
+    "thundering": null,
+    "sepulchral": null,
+    "speed": null,
+    "poisonous": null
+   },
+   "melhorias": {
+    "accurate": null,
+    "pungent": null,
+    "cruel": null,
+    "atrocious": null,
+    "balanced": null,
+    "harmonized": null,
+    "injection": null,
+    "massive": null,
+    "specialmaterial": null,
+    "scope": null,
+    "precise": null,
+    "golden": null,
+    "gems": null,
+    "discreet": null,
+    "macabre": null
+   },
+   "chatGif": "",
+   "upgrades": {
+    "melhoria1": "",
+    "melhoria2": "",
+    "melhoria3": "",
+    "melhoria4": "",
+    "material": "",
+    "encanto1": "",
+    "encanto2": "",
+    "encanto3": ""
+   },
+   "ataques": 1,
+   "proficiencia": "natural",
+   "proposito": "corpo-a-corpo",
+   "empunhadura": "leve",
+   "size": "normal",
+   "rolltags": []
+  },
+  "effects": [],
+  "flags": {}
+ },
+ "magia": {
+  "name": "",
+  "type": "magia",
+  "img": "icons/svg/item-bag.svg",
+  "effects": [],
+  "flags": {},
+  "system": {
+   "description": {
+    "value": "",
+    "unidentified": ""
+   },
+   "source": "",
+   "ativacao": {
+    "execucao": "",
+    "custo": 0,
+    "qtd": "",
+    "condicao": "",
+    "special": ""
+   },
+   "duracao": {
+    "value": 0,
+    "units": "inst",
+    "special": ""
+   },
+   "target": {
+    "value": null,
+    "width": null,
+    "type": ""
+   },
+   "range": {
+    "value": null,
+    "units": ""
+   },
+   "consume": {
+    "type": "",
+    "target": "",
+    "amount": null,
+    "mpMultiplier": false
+   },
+   "efeito": "",
+   "alcance": "medium",
+   "alvo": "",
+   "area": "",
+   "resistencia": {
+    "pericia": "",
+    "atributo": "",
+    "bonus": 0,
+    "txt": ""
+   },
+   "rolls": [],
+   "tipo": "arc",
+   "circulo": "2",
+   "preparada": false,
+   "escola": "evo",
+   "chatFlavor": "",
+   "origin": "",
+   "tags": [],
+   "chatGif": "",
+   "rolltags": [],
+   "equipado2": {
+    "slot": 0,
+    "type": ""
+   }
+  }
+ },
+ "efeito": {
+  "name": "",
+  "tint": "#ffffff",
+  "flags": {
+   "tormenta20": {
+    "onuse": false,
+    "durationScene": false,
+    "self": false,
+    "attack": false,
+    "skill": false,
+    "ability": false,
+    "power": false,
+    "equipment": false,
+    "spell": false,
+    "consumable": false,
+    "items": "",
+    "aumenta": false,
+    "custo": ""
+   }
+  },
+  "duration": {
+   "rounds": null,
+   "seconds": null,
+   "startTime": null,
+   "combat": null,
+   "turns": null,
+   "startRound": null,
+   "startTurn": null
+  },
+  "disabled": true,
+  "img": "icons/svg/upgrade.svg",
+  "type": "base",
+  "system": {},
+  "changes": [],
+  "description": "",
+  "transfer": true,
+  "statuses": [],
+  "sort": 0
+ }
+}
+##### ARQUIVO: tools/extrair_pdf.py #####
+"""Extrai fichas de ameaças de um PDF de Tormenta20 para o formato de texto do conversor.
+
+  python tools/extrair_pdf.py livro.pdf --paginas 140-145 -o fichas/livro.txt
+  python tools/extrair_pdf.py livro.pdf --paginas 142 --diagnostico      # fontes de cada trecho
+
+Como funciona: lê cada trecho de texto com a fonte (PyMuPDF). Trechos em negrito viram
+**rótulos**, itálico vira *itálico*. Uma ficha começa no título acima de "Iniciativa"
+e termina no "Tesouro". Fichas são separadas por "===".
+
+ATENÇÃO: ainda não calibrado com o PDF real (fontes de versalete, ícones, duas colunas).
+Rode com --diagnostico numa página com ficha e mande a saída para ajustar.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+
+try:
+    import pymupdf as fitz
+except ImportError:  # versões antigas
+    import fitz
+
+NEGRITO = re.compile(r"bold|black|heavy|semibold|demi|hebo|-b\b", re.I)
+ITALICO = re.compile(r"italic|oblique|heit", re.I)
+
+
+def paginas(spec: str, total: int):
+    out = []
+    for parte in spec.split(","):
+        a, _, b = parte.partition("-")
+        out += range(int(a), int(b or a) + 1)
+    return [p for p in out if 1 <= p <= total]
+
+
+def linhas_da_pagina(pg) -> list[dict]:
+    """Linhas com spans, ordenadas por coluna e depois por altura."""
+    meio = pg.rect.width / 2
+    linhas = []
+    for b in pg.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            spans = [s for s in l["spans"] if s["text"].strip()]
+            if not spans:
+                continue
+            x0, y0 = l["bbox"][0], l["bbox"][1]
+            largura = l["bbox"][2] - x0
+            col = 0 if (x0 < meio and largura < meio * 1.2) or largura >= meio * 1.2 and x0 < meio else 1
+            linhas.append({"col": col, "y": round(y0, 1), "x": x0, "spans": spans,
+                           "tam": max(s["size"] for s in spans)})
+    linhas.sort(key=lambda l: (l["col"], l["y"], l["x"]))
+    return linhas
+
+
+def marca(spans) -> str:
+    out = ""
+    for s in spans:
+        t = s["text"]
+        neg = bool(s["flags"] & 16) or bool(NEGRITO.search(s["font"]))
+        ita = bool(s["flags"] & 2) or bool(ITALICO.search(s["font"]))
+        if neg and t.strip():
+            t = f"**{t.strip()}** " if not t.startswith(" ") else f" **{t.strip()}** "
+        elif ita and t.strip():
+            t = f"*{t.strip()}* " if not t.startswith(" ") else f" *{t.strip()}* "
+        out += t
+    out = re.sub(r"\*\*\s*\*\*", " ", out)          # funde negritos vizinhos
+    return re.sub(r"\s+", " ", out).replace(" ,", ",").replace(" .", ".").strip()
+
+
+def extrair(doc, pags) -> list[str]:
+    todas = []
+    for n in pags:
+        todas += linhas_da_pagina(doc[n - 1])
+    txt = [marca(l["spans"]) for l in todas]
+    fichas, i = [], 0
+    while i < len(txt):
+        if re.match(r"^\*\*\s*iniciativa", txt[i], re.I):
+            ini = i
+            # sobe até 4 linhas atrás para pegar nome / ND / tipo
+            while ini > 0 and i - ini < 4 and not re.search(r"tesouro", txt[ini - 1], re.I):
+                ini -= 1
+            fim = i
+            while fim < len(txt) and not re.match(r"^\*\*\s*tesouro|.*\*\*\s*tesouro\s*\*\*", txt[fim], re.I):
+                fim += 1
+            # o "Tesouro" pode quebrar linha: pega a continuação se não for rótulo
+            fim2 = fim + 1
+            while fim2 < len(txt) and not txt[fim2].startswith("**") and fim2 - fim < 2 \
+                    and not re.search(r"\bND\b", txt[fim2]):
+                fim2 += 1
+            bloco = txt[ini:fim2]
+            nd = next((b for b in bloco[:5] if re.fullmatch(r"\**\s*ND\s*[\d/]+\s*\**", b)), None)
+            cab = [re.sub(r"\*", "", b) for b in bloco[:i - ini]]
+            corpo = bloco[i - ini:]
+            fichas.append("\n".join(cab + ([] if nd else []) + corpo))
+            i = fim2
+        else:
+            i += 1
+    return fichas
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("pdf")
+    ap.add_argument("--paginas", required=True, help="ex.: 140-145 ou 12,15,20-22 (numeração do PDF)")
+    ap.add_argument("-o", "--saida")
+    ap.add_argument("--diagnostico", action="store_true")
+    a = ap.parse_args()
+    doc = fitz.open(a.pdf)
+    pags = paginas(a.paginas, len(doc))
+    if a.diagnostico:
+        for n in pags:
+            print(f"===== página {n}")
+            for l in linhas_da_pagina(doc[n - 1]):
+                print(f"[c{l['col']} y{l['y']:.0f}] " + " | ".join(
+                    f"{s['text']!r}<{s['font']},{s['size']:.1f},f{s['flags']}>" for s in l["spans"]))
+        return
+    fichas = extrair(doc, pags)
+    saida = "\n===\n".join(fichas) + "\n"
+    if a.saida:
+        open(a.saida, "w", encoding="utf-8").write(saida)
+        print(f"{len(fichas)} ficha(s) -> {a.saida}", file=sys.stderr)
+    else:
+        print(saida)
+
+
+if __name__ == "__main__":
+    main()
+
+##### ARQUIVO: tools/analisar_compendio.py #####
+"""Levanta as convenções usadas num compêndio desempacotado (pasta de JSONs de atores)."""
+import json, sys, glob, collections as C
+pasta = sys.argv[1]
+cnt = {k: C.Counter() for k in "tipo tamanho role sentidos ic ic_custom nd item_types exec eff_key eff_flags eff_mode alcance poder_tipo arma_prof crit res_txt roll_part_tags roll_tipos dano_tipos atk_parts pericia_conv defatr cd duration_units movement_units magia_tipo".split()}
+ex = C.defaultdict(list)
+atores = 0
+for fp in glob.glob(pasta + "/*.json"):
+    d = json.load(open(fp))
+    if d.get("type") != "npc": continue
+    atores += 1
+    s = d["system"]; a = s["attributes"]
+    cnt["tipo"][s["detalhes"].get("tipo")] += 1
+    cnt["tamanho"][s["tracos"].get("tamanho")] += 1
+    cnt["role"][s["detalhes"].get("role")] += 1
+    cnt["cd"][a.get("cd")] += 1
+    for v in a["sentidos"]["value"]: cnt["sentidos"][v] += 1
+    for v in s["tracos"]["ic"]["value"]: cnt["ic"][v] += 1
+    if s["tracos"]["ic"]["custom"]: cnt["ic_custom"][s["tracos"]["ic"]["custom"]] += 1
+    for k, p in s["pericias"].items():
+        if p.get("value") or p.get("outros"):
+            kind = "save" if k in ("fort","refl","vont") else "skill"
+            cnt["pericia_conv"][(kind, "value" if p.get("value") else "-", "outros" if p.get("outros") else "-", p.get("treinado"))] += 1
+    for e in d.get("effects", []):
+        for ch in e["changes"]: cnt["eff_key"]["ACTOR:"+ch["key"]] += 1
+    for it in d["items"]:
+        x = it["system"]; cnt["item_types"][it["type"]] += 1
+        at = x.get("ativacao") or {}
+        cnt["exec"][at.get("execucao")] += 1
+        if it["type"] == "poder": cnt["poder_tipo"][(x.get("tipo"), x.get("subtipo"))] += 1
+        if it["type"] == "magia": cnt["magia_tipo"][(x.get("tipo"), x.get("escola"), x.get("circulo"))] += 1
+        if it["type"] == "arma":
+            cnt["arma_prof"][(x.get("proficiencia"), x.get("proposito"), x.get("empunhadura"))] += 1
+        if x.get("alcance"): cnt["alcance"][(it["type"], x["alcance"])] += 1
+        r = x.get("resistencia") or {}
+        if r.get("pericia") or r.get("atributo") or r.get("bonus"): cnt["res_txt"][(r.get("pericia"), r.get("atributo"), r.get("bonus"))] += 1
+        if (x.get("duracao") or {}).get("units"): cnt["duration_units"][x["duracao"]["units"]] += 1
+        for rl in x.get("rolls", []):
+            cnt["roll_tipos"][(it["type"], rl.get("type"), rl.get("name"))] += 1
+            for p in rl.get("parts", []):
+                if len(p) > 2: cnt["roll_part_tags"][(rl.get("type"), p[2])] += 1
+                if rl.get("type") == "dano" and len(p) > 1: cnt["dano_tipos"][p[1]] += 1
+            if rl.get("type") == "ataque": cnt["atk_parts"][tuple(("N" if str(p[0]).lstrip("+").isdigit() else p[0]) for p in rl["parts"])] += 1
+        for e in it.get("effects", []):
+            fl = (e.get("flags") or {}).get("tormenta20", {})
+            sig = tuple(k for k in ("onuse","self","attack","skill","spell","power","ability","equipment","consumable","aumenta","durationScene") if fl.get(k)) + (("items="+fl["items"],) if fl.get("items") else ())
+            cnt["eff_flags"][(it["type"], sig, e.get("transfer"), e.get("disabled"))] += 1
+            for ch in e["changes"]:
+                cnt["eff_key"][ch["key"]] += 1
+                cnt["eff_mode"][(ch["key"], ch["mode"])] += 1
+                if len(ex[ch["key"]]) < 4: ex[ch["key"]].append(f'{d["name"]}/{it["name"]}: {ch["value"]!r} m{ch["mode"]} | {e["name"][:70]}')
+print("atores npc:", atores)
+for k, c in cnt.items():
+    print(f"\n== {k} ({sum(c.values())})")
+    for v, n in c.most_common(45): print(f"  {n:5} {v}")
+print("\n== exemplos por chave de efeito")
+for k, l in sorted(ex.items()):
+    print(" ", k); [print("     ", y) for y in l]
+
+##### ARQUIVO: tools/avaliar_regras.py #####
+"""Roda o motor de regras sobre todos os poderes de uma biblioteca e compara com a
+configuração feita à mão. Uso: python tools/avaliar_regras.py biblioteca.json [n_exemplos]"""
+import collections
+import json
+import random
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from t20conv.biblioteca import texto_puro  # noqa: E402
+from t20conv.regras import automatizar_habilidade  # noqa: E402
+
+bib = json.load(open(sys.argv[1], encoding="utf-8"))
+n_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+cat = collections.Counter()
+ex = collections.defaultdict(list)
+for nome, lst in bib["poderes"].items():
+    for c in lst:
+        it = c["item"]
+        x = it["system"]
+        txt = texto_puro(x.get("description", {}).get("value", ""))
+        if not txt or len(txt) < 15:
+            continue
+        h = {"nome": it["name"], "execucao": (x.get("ativacao") or {}).get("execucao", ""),
+             "custo": (x.get("ativacao") or {}).get("custo", 0), "sustentada": False, "texto": txt}
+        a = automatizar_habilidade(h)
+        mao = bool(it.get("effects") or x.get("rolls"))
+        regra = bool(a["effects"] or a["rolls"])
+        k = {(True, True): "ambos", (True, False): "só à mão", (False, True): "só regras",
+             (False, False): "nenhum"}[(mao, regra)]
+        cat[k] += 1
+        ex[k].append((c["ator"], it["name"], txt[:170],
+                      [(r["name"], r["parts"]) for r in x.get("rolls", [])][:2],
+                      [[(ch["key"], ch["value"]) for ch in e["changes"]] for e in it.get("effects", [])][:2],
+                      [(r["name"], r["parts"]) for r in a["rolls"]][:2],
+                      [[(ch["key"], ch["value"]) for ch in e["changes"]] for e in a["effects"]][:2]))
+print(cat)
+random.seed(1)
+for k in ("ambos", "só à mão", "só regras"):
+    print(f"\n######## {k}")
+    for e in random.sample(ex[k], min(n_ex, len(ex[k]))):
+        print(f"- {e[0]} / {e[1]}: {e[2]}\n    MÃO rolls={e[3]} efs={e[4]}\n    REGRA rolls={e[5]} efs={e[6]}")
+
+##### ARQUIVO: tools/gerar_template.py #####
+"""Gera t20conv/template_npc.json (esqueleto vazio de ator NPC) a partir de um
+ator exportado do Foundry. Uso: python tools/gerar_template.py exemplos/fvtt-Actor-oni-*.json
+"""
+import json
+import sys
+from pathlib import Path
+
+src = json.load(open(sys.argv[1], encoding="utf-8"))
+s = src["system"]
+
+for a in s["atributos"].values():
+    a.update(value=0, bonus=0, base=0, racial=0)
+
+at = s["attributes"]
+at["cd"] = 10
+at["pv"].update(value=0, max=0, temp=0)
+at["pm"].update(value=0, max=0, temp=0)
+for k in ("burrow", "climb", "fly", "swim", "walk"):
+    at["movement"][k] = 0
+at["defesa"].update(base=10, value=10, outros=0, bonus=[], condi=0)
+at["sentidos"] = {"value": [], "custom": ""}
+at["nd"] = ""
+
+for k in s["detalhes"]:
+    if isinstance(s["detalhes"][k], str):
+        s["detalhes"][k] = ""
+s["detalhes"]["biography"] = {"value": "", "public": ""}
+s["detalhes"]["role"] = "solo"
+
+for r in s["tracos"]["resistencias"].values():
+    r.update(value=0, base=0, bonus=[], imunidade=False, vulnerabilidade=False, excecao=0)
+s["tracos"]["ic"] = {"value": [], "custom": ""}
+s["tracos"]["tamanho"] = "med"
+
+for p in s["pericias"].values():
+    p.update(value=0, outros=0, treinado=False, condi=0, bonus=[])
+
+tok = src["prototypeToken"]
+tok["name"] = ""
+tok["texture"]["src"] = "icons/svg/mystery-man.svg"
+
+tpl = {
+    "name": "",
+    "type": "npc",
+    "img": "icons/svg/mystery-man.svg",
+    "system": s,
+    "prototypeToken": tok,
+    "items": [],
+    "effects": [],
+    "flags": {},
+}
+out = Path(__file__).resolve().parent.parent / "t20conv" / "template_npc.json"
+out.write_text(json.dumps(tpl, ensure_ascii=False, indent=1), encoding="utf-8")
+print("ok", out)
+
+# ---- esqueletos de item (poder / arma / magia) e de efeito
+import glob
+base = Path(__file__).resolve().parent.parent / "exemplos"
+def acha(nome_arq, nome_item, tipo):
+    d = json.load(open(next(iter(glob.glob(str(base / nome_arq)))), encoding="utf-8"))
+    return next(i for i in d["items"] if i["name"] == nome_item and i["type"] == tipo)
+esq = {
+    "poder": acha("fvtt-Actor-oni-*.json", "Avesso à Honra", "poder"),
+    "arma": acha("fvtt-Actor-oni-*.json", "Chifres", "arma"),
+    "magia": acha("fvtt-Actor-dracomante-*.json", "Bola de Fogo", "magia"),
+}
+efeito = json.loads(json.dumps(esq["poder"]["effects"][0]))
+for k, it in esq.items():
+    it = json.loads(json.dumps(it))
+    for campo in ("_id", "folder", "ownership", "_stats", "sort"):
+        it.pop(campo, None)
+    it["effects"] = []
+    it["flags"] = {}
+    it["name"] = ""
+    it["img"] = "icons/svg/item-bag.svg"
+    x = it["system"]
+    x["description"] = {"value": "", "unidentified": ""}
+    x["rolls"] = []
+    x["ativacao"] = {"execucao": "", "custo": 0, "qtd": "", "condicao": "", "special": ""}
+    for c in ("alvo", "area", "efeito", "chatFlavor", "source"):
+        if c in x:
+            x[c] = ""
+    if "resistencia" in x:
+        x["resistencia"] = {"pericia": "", "atributo": "", "bonus": 0, "txt": ""}
+    esq[k] = it
+for c in ("_id", "_stats", "origin"):
+    efeito.pop(c, None)
+efeito.update(name="", changes=[], disabled=True, transfer=True)
+efeito["flags"]["tormenta20"] = {"onuse": False, "durationScene": False, "self": False,
+    "attack": False, "skill": False, "ability": False, "power": False, "equipment": False,
+    "spell": False, "consumable": False, "items": "", "aumenta": False, "custo": ""}
+esq["efeito"] = efeito
+out2 = Path(__file__).resolve().parent.parent / "t20conv" / "esqueletos.json"
+out2.write_text(json.dumps(esq, ensure_ascii=False, indent=1), encoding="utf-8")
+print("ok", out2)
+
+##### ARQUIVO: macros/importar_atores.js #####
+// Macro (tipo Script) — Foundry v11/v12, sistema tormenta20.
+// Importa os atores gerados pelo t20conv (saida/_todos.json ou um .json de ator) para uma pasta.
+const escolha = await new Promise((resolve) => {
+  new Dialog({
+    title: "Importar ameaças (t20conv)",
+    content: `
+      <p>Arquivo .json gerado pelo conversor (<code>_todos.json</code> ou de um ator):</p>
+      <p><input type="file" accept=".json" id="t20-arq"/></p>
+      <p>Pasta: <input type="text" id="t20-pasta" value="Ameaças importadas"/></p>
+      <p><label><input type="checkbox" id="t20-subst" checked/> Substituir atores com o mesmo nome nessa pasta</label></p>`,
+    buttons: {
+      ok: {
+        label: "Importar",
+        callback: (html) => {
+          const arq = html.find("#t20-arq")[0].files[0];
+          if (!arq) return resolve(null);
+          resolve(arq.text().then((texto) => ({
+            texto,
+            pasta: html.find("#t20-pasta").val().trim() || "Ameaças importadas",
+            substituir: html.find("#t20-subst").is(":checked"),
+          })));
+        },
+      },
+      cancelar: { label: "Cancelar", callback: () => resolve(null) },
+    },
+    default: "ok",
+    close: () => resolve(null),
+  }).render(true);
+});
+if (!escolha) return;
+
+let dados = JSON.parse(escolha.texto);
+if (!Array.isArray(dados)) dados = [dados];
+
+const pasta = game.folders.find((f) => f.type === "Actor" && f.name === escolha.pasta)
+  ?? await Folder.create({ name: escolha.pasta, type: "Actor" });
+
+if (escolha.substituir) {
+  const nomes = new Set(dados.map((d) => d.name));
+  const velhos = game.actors.filter((a) => a.folder?.id === pasta.id && nomes.has(a.name)).map((a) => a.id);
+  if (velhos.length) await Actor.deleteDocuments(velhos);
+}
+for (const d of dados) {
+  delete d._id;
+  d.folder = pasta.id;
+}
+const criados = await Actor.createDocuments(dados);
+ui.notifications.info(`${criados.length} ameaça(s) importada(s) em "${pasta.name}".`);
+
+##### ARQUIVO: macros/exportar_compendio.js #####
+// Macro (tipo Script) — exporta um compêndio inteiro para .json (lista de documentos).
+// Use para alimentar a biblioteca do t20conv, ex.: o compêndio de magias do sistema
+// (tormenta20.magias) e o seu ameacas-de-arton-cdm.ameacas:
+//   python -m t20conv.biblioteca ameacas.json magias.json -o biblioteca.json
+const packs = game.packs.filter((p) => ["Actor", "Item"].includes(p.documentName));
+const opcoes = packs
+  .map((p) => `<option value="${p.collection}">${p.title} (${p.collection})</option>`)
+  .join("");
+new Dialog({
+  title: "Exportar compêndio para JSON",
+  content: `<p><select id="t20-pack" style="width:100%">${opcoes}</select></p>`,
+  buttons: {
+    ok: {
+      label: "Exportar",
+      callback: async (html) => {
+        const pack = game.packs.get(html.find("#t20-pack").val());
+        ui.notifications.info(`Lendo ${pack.title}...`);
+        const docs = await pack.getDocuments();
+        saveDataToFile(
+          JSON.stringify(docs.map((d) => d.toObject())),
+          "application/json",
+          `${pack.collection}.json`,
+        );
+      },
+    },
+  },
+  default: "ok",
+}).render(true);
+
+##### ARQUIVO: exemplos/fichas/oni.txt #####
+ONI
+ND 5
+Espírito Médio [solo]
+**Iniciativa** +5, **Percepção** +3, faro, visão na penumbra
+**Defesa** 24, **Fort** +17, **Ref** +11, **Von** +5, imunidade a doenças,
+fogo e veneno, redução de dano 5
+**Pontos de Vida** 200
+**Deslocamento** 9m (6q)
+---
+**Corpo a Corpo** Machado de guerra +17 (1d12+16, x3) e chifres +17 (1d6+10 mais doença).
+**Ataque Pesado (Livre)** Quando acerta um ataque de macha-
+do de guerra, o oni faz a manobra derrubar ou empurrar contra o alvo (teste +19).
+**Avesso à Honra** Os ataques do oni causam +1d10 pontos de dano de trevas contra devotos de Lin-Wu e personagens que sigam algum código de conduta (como Código de Honra ou Código do Herói).
+**Doença** Uma criatura atingida pelos chifres do oni é exposta à doença calafrio diabólico (veja *Tormenta20*, p. 318).
+---
+**For** 5, **Des** 1, **Con** 3, **Int** 0, **Sab** –1, **Car** –2
+---
+**Perícias** Atletismo +9, Intimidação +7.
+**Equipamento** Machado de guerra. **Tesouro** Padrão.
+
+##### ARQUIVO: exemplos/fichas/dragao-celestial-jovem.txt #####
+DRAGÃO CELESTIAL JOVEM
+ND 10
+Espírito Grande [solo]
+**Iniciativa** +12, **Percepção** +16, percepção às cegas, visão no escuro
+**Defesa** 35, **Fort** +18, **Ref** +10, **Von** +22, imunidade a eletricidade, redução de dano 5, resistência a magia +2, vulnerabilidade a ácido
+**Pontos de Vida** 450
+**Deslocamento** 12m (8q), voo 36m (24q)
+---
+**Pontos de Mana** 75
+**Corpo a Corpo** Mordida +29 (4d10+20, 18) e duas garras +29 (3d10+20, 18).
+**Magias** Como um clérigo de Lin-Wu de 10º nível (CD 32).
+• *Coluna de Chamas (Padrão, 10 PM)* Um cilindro com 3m de raio e 30m de altura desce dos céus em um ponto em alcance longo, causando 8d6 pontos de dano de fogo mais 8d6 pontos de dano de luz nas criaturas e objetos livres na área (Ref reduz à metade).
+• *Curar Ferimentos (Padrão, 10 PM)* Uma criatura adjacente cura 11d8+11 PV ou criaturas escolhidas em alcance curto curam 6d8+6.
+• *Dissipar Magia (Padrão, 3 PM)* O dragão escolhe uma criatura, objeto ou esfera de 3m em alcance médio e faz um teste de Misticismo. Todas as magias nesse alvo com CD igual ou menor que o resultado do teste são dissipadas.
+• *Escudo da Fé (Reação, 8 PM)* Quando sofre um ataque, o dragão recebe camuflagem leve contra ataques à distância e +5 na Defesa por 1 turno.
+• *Santuário (Padrão, 10 PM)* O dragão toca uma criatura. Até o fim da cena, ou até que essa criatura faça uma ação hostil, qualquer criatura que tente fazer uma ação hostil contra ela, ou contra uma área que a inclui, perde a ação (Von evita).
+---
+**For** 9, **Des** 2, **Con** 8, **Int** 4, **Sab** 5, **Car** 4
+---
+**Perícias** Conhecimento +15, Diplomacia +15, Intuição +16, Misticismo +15, Religião +16.
+**Tesouro** Dobro.
+
+##### ARQUIVO: exemplos/fichas/dracomante-superior.txt #####
+DRACOMANTE SUPERIOR
+ND 14
+Humanoide (elfo) Médio [especial]
+**Iniciativa** +18, **Percepção** +16, visão na penumbra
+**Defesa** 33, **Fort** +12, **Ref** +20, **Von** +28, redução de fogo 15
+**Pontos de Vida** 500
+**Deslocamento** 12m (8q)
+---
+**Pontos de Mana** 112
+**Corpo a Corpo** Adaga +30 (1d4+15, 19).
+**Arcano de Batalha** O dracomante superior soma sua Inteligência nas rolagens de dano quando lança magias ou usa seu raio arcano (já contabilizado).
+**Dracomancia** Quando lança uma magia ou usa Raio Arcano, o dracomante recebe redução de dano 5 e resistência a magia +5 até o início de seu próximo turno.
+**Magia Acelerada (Livre, +4 PM)** Uma vez por rodada, quando usa seu Raio Arcano ou lança uma magia com execução de ação completa ou menor, o dracomante superior muda a execução dela para livre.
+**Presença Aterradora (Padrão, 1 PM)** O dracomante faz um teste de Intimidação oposto à Vontade de criaturas em alcance curto. Aquelas que falharem no teste ficam abaladas até o fim da cena; se que falharem por 10 ou mais também ficam apavoradas por 1 rodada.
+**“PRESENCIEM O VERDADEIRO PODER!” (Reação, 23 PM)** Quando é reduzido a 300 PV ou menos, o dracomante lança a magia *Transformação em Dragão* (veja abaixo).
+**Raio Arcano (Padrão, 1 PM)** Uma criatura em alcance médio sofre 4d12+8 pontos de dano de fogo e fica em chamas (Ref CD 38 reduz à metade e evita a condição).
+**Magias** Como um mago de 14º nível (CD 38, limite de PM 23).
+• *Armadura Arcana (Padrão, 15 PM)* O dracomante recebe +11 na Defesa por um dia.
+• *Bola de Fogo (Padrão, 11 PM)* O dracomante causa 15d6+23 pontos de dano de fogo em todas as criaturas e objetos livres numa esfera de 6m em alcance médio (Ref reduz à metade).
+• *Campo de Força (Reação, 7 PM)* Quando sofre dano, o dracomante recebe redução de dano 50 contra este dano.
+• *Talho Invisível de Edauros (Padrão, 10 PM)* Criaturas em um cone de 9m sofrem 10d8+8 pontos de dano de corte e ficam sangrando (Fort reduz à metade e evita a condição).
+• *Transformação em Dragão (Completa, 23 PM)* O dracomante recebe +2 em Força, Constituição, Inteligência e Carisma, +5 na Defesa, redução de fogo 30, deslocamento de voo 18m e um ataque de mordida (ataque +30, dano 1d6+15, 19/x3) que pode ser usado com sua adaga. Além disso, uma vez por rodada, ele pode gastar uma ação padrão para soprar fogo, causando 10d6+10 pontos de dano de fogo em um cone de 9m (Ref reduz à metade).
+• *Velocidade (Padrão, 10 PM, sustentada)* O dracomante pode executar uma ação padrão adicional por turno.
+---
+**For** –1, **Des** 4, **Con** 4, **Int** 8, **Sab** 2, **Car** 5
+---
+**Perícias** Conhecimento +22, Intimidação +19, Misticismo +24.
+**Equipamento** Adaga, cetro elemental de couro de dragão (fogo), *pergaminho de Transformação em Dragão*. **Tesouro** Nenhum.
+
+##### ARQUIVO: README.md #####
+# t20conv — fichas de ameaças de Tormenta20 → atores do Foundry VTT
+
+Converte o bloco de estatísticas de uma ameaça (texto ou PDF) em um ator NPC do sistema
+**tormenta20** (testado com o formato da v1.4.213 / Foundry v12), com ataques, rolagens,
+magias e efeitos ativos já configurados. Sem custo de tokens: tudo roda local, em Python.
+
+## Instalação
+
+Python 3.10+ e, para ler PDF, `pip install pymupdf`.
+
+## Fluxo
+
+```
+PDF ──tools/extrair_pdf.py──▶ fichas/*.txt ──converter.py──▶ saida/*.json ──macro──▶ Foundry
+                                                  ▲
+                         biblioteca.json (seu compêndio configurado à mão)
+```
+
+1. **Biblioteca (uma vez):** no Foundry, rode a macro `macros/exportar_compendio.js` e exporte
+   `ameacas-de-arton-cdm.ameacas` e `tormenta20.magias`. Depois:
+   `python -m t20conv.biblioteca ameacas-de-arton-cdm.ameacas.json tormenta20.magias.json -o biblioteca.json`
+   (também aceita as pastas que o `foundryvtt-cli unpack` gera).
+2. **Extrair do PDF:** `python tools/extrair_pdf.py livro.pdf --paginas 140-150 -o fichas/cap5.txt`
+   e revise o .txt rapidamente (é texto simples).
+3. **Converter:** `python converter.py fichas/ -o saida/ --biblioteca biblioteca.json`
+4. **Importar:** macro `macros/importar_atores.js` → escolha `saida/_todos.json`.
+   (Ou um ator só: botão direito num ator → *Import Data* → `saida/<nome>.json`.)
+5. Leia `saida/_relatorio.txt`: diz o que foi automatizado e o que ficou só em texto.
+
+## Formato do texto da ficha
+
+```
+ONI
+ND 5
+Espírito Médio [solo]                 ← [solo] / [especial] / [lacaio] (padrão: solo)
+**Iniciativa** +5, **Percepção** +3, faro, visão na penumbra
+**Defesa** 24, **Fort** +17, **Ref** +11, **Von** +5, imunidade a doenças, fogo e veneno, redução de dano 5
+**Pontos de Vida** 200
+**Deslocamento** 9m (6q)
+**Corpo a Corpo** Machado de guerra +17 (1d12+16, x3) e chifres +17 (1d6+10 mais doença).
+**Avesso à Honra** Os ataques do oni causam +1d10 pontos de dano de trevas contra ...
+**Magias** Como um mago de 14º nível (CD 38, limite de PM 23).
+• *Bola de Fogo (Padrão, 11 PM)* O dracomante causa 15d6+23 pontos de dano de fogo ...
+**For** 5, **Des** 1, **Con** 3, **Int** 0, **Sab** –1, **Car** –2
+**Perícias** Atletismo +9, Intimidação +7.
+**Equipamento** Machado de guerra. **Tesouro** Padrão.
+```
+Rótulos em `**negrito**`; linhas quebradas e hifenização são juntadas sozinhas; várias fichas
+num arquivo são separadas por uma linha `===`. Exemplos em `exemplos/fichas/`.
+
+## O que é automatizado
+
+| Na ficha | No Foundry |
+|---|---|
+| Atributos, PV, PM, Defesa, deslocamentos, sentidos, ND, tipo, tamanho, papel | campos do ator; tamanho do token |
+| Fort/Ref/Von, Iniciativa, Percepção, perícias | perícias (mesma convenção do compêndio) |
+| imunidades, redução de dano/energia, vulnerabilidades | resistências; imunidade a condições (`ic`) |
+| resistência a magia +N | poder com efeito de teste (Vontade/Reflexos/Fortitude) |
+| ataques `nome +N (dano, crítico mais X)` | arma com ataque, dano **tipado**, margem/multiplicador; "duas garras" etc. |
+| "mais doença/veneno" num ataque | texto da habilidade copiado na descrição da arma |
+| `(Execução, N PM)` | execução e custo da habilidade/magia |
+| "sofre/causa XdY pontos de dano de T [mais ...]" | rolagem de dano (com tipos) |
+| "cura XdY", "PV temporários", "perde XdY PV" | rolagem de cura / PV temp. / perda |
+| "manobra derrubar … (teste +19)" | rolagem `d20+19` chamada "Derrubar" |
+| "(Ref CD 38 reduz à metade)" | resistência da habilidade |
+| **bônus condicional em ataques** (Avesso à Honra etc.) | efeito *ao usar* marcável no diálogo de ataque, com tipo: `1d10[trevas]` |
+| bônus condicional em testes ("+5 em Vontade se…") | efeito *ao usar* de teste |
+| buffs com duração ("recebe +5 na Defesa por 1 turno", RD, voo, atributos) | efeito: aplicado ao usar (ativas) ou alternável (gatilhos) |
+| "muda a execução para livre" (Magia Acelerada) | efeito *ao usar* em magias, com custo em PM |
+| magias da ficha | item de magia com escola/círculo/ícone da biblioteca + dano/cura/CD **finais** da ficha |
+| ataque concedido por magia (mordida da Transformação em Dragão) | arma extra |
+| "(já contabilizado)" | ignorado de propósito, para não somar duas vezes |
+| poder com texto idêntico a um já configurado no compêndio | reaproveita o item feito à mão |
+
+Bônus permanentes ("recebe +2 em Furtividade") **não** viram efeito, porque os números do
+livro já os incluem.
+
+## Ferramentas de apoio
+
+- `tools/avaliar_regras.py biblioteca.json` — roda as regras em todos os poderes do compêndio e
+  compara com o que foi feito à mão (hoje: 478 iguais/compatíveis, 162 só pelas regras).
+- `tools/extrair_pdf.py --diagnostico` — mostra fontes/negrito de cada trecho, para calibrar.
+- `tools/gerar_template.py` — regenera o esqueleto de ator/itens a partir de um ator exportado.
+
+##### FIM #####
